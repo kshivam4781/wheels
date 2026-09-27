@@ -162,7 +162,12 @@ component extends="wheels.wheelstest.system.BaseSpec" {
 			});
 
 			it("reads --mode", () => {
-				expect(probe.$parseSeedArgs({mode: "development"}).mode).toBe("development");
+				expect(probe.$parseSeedArgs({mode: "convention"}).mode).toBe("convention");
+			});
+
+			it("rejects a --mode outside auto/convention/generate (##2963)", () => {
+				// An unknown mode fell through to auto and generated rows.
+				expect(() => probe.$parseSeedArgs({mode: "development"})).toThrow(type = "Wheels.InvalidArguments");
 			});
 
 			it("maps --generate to mode=generate", () => {
@@ -247,9 +252,31 @@ component extends="wheels.wheelstest.system.BaseSpec" {
 			});
 
 			it("detects the --dry-run and --to misfires for the nudge", () => {
-				var o = probe.$parseUpgradeArgs({arg1: "oops", "dry-run": "true", to: "4.0.0"});
+				var o = probe.$parseUpgradeArgs({arg1: "apply", "dry-run": "true", to: "4.0.0"});
 				expect(o.sawDryRun).toBeTrue();
 				expect(o.sawTo).toBeTrue();
+			});
+
+			it("rejects any key present with a NULL value before deciding anything (##2963)", () => {
+				// The stdio transport turns {"dry-run": ""} into dry-run=null.
+				// dry-run is undeclared and structKeyExists() is false for a
+				// null value, so it counted as "not passed" and apply ran.
+				for (var key in ["dry-run", "backup", "help", "strict"]) {
+					var coll = createObject("java", "java.util.HashMap").init();
+					coll.put("subcommand", "apply");
+					coll.put(key, javaCast("null", ""));
+					expect(() => probe.$parseUpgradeArgs(coll)).toThrow(type = "Wheels.InvalidArguments", regex = key);
+				}
+			});
+
+			it("treats explicit false/empty values as not passed (MCP sends schema defaults, ##2963)", () => {
+				// sawX used key presence, so apply {strict: false} was refused
+				// as "--strict is not supported by the apply verb".
+				var o = probe.$parseUpgradeArgs({arg1: "apply", strict: false, "dry-run": "false", format: "", to: ""});
+				expect(o.sawStrict).toBeFalse();
+				expect(o.sawDryRun).toBeFalse();
+				expect(o.sawFormat).toBeFalse();
+				expect(o.sawTo).toBeFalse();
 			});
 
 			it("reads --format=json for machine-readable CI output", () => {
@@ -321,9 +348,13 @@ component extends="wheels.wheelstest.system.BaseSpec" {
 
 			it("keeps named values in place instead of running the legacy reorder", () => {
 				// The reorder guesses which token is the type; named keys say so.
-				var o = probe.$parseDestroyArgs({type: "bogus", name: "User"});
-				expect(o.name).toBe("User");
-				expect(o.type).toBe("bogus");
+				var o = probe.$parseDestroyArgs({type: "view", name: "model"});
+				expect(o.name).toBe("model");
+				expect(o.type).toBe("view");
+			});
+
+			it("rejects a named type outside the choices (##2963)", () => {
+				expect(() => probe.$parseDestroyArgs({type: "bogus", name: "User"})).toThrow(type = "Wheels.InvalidArguments");
 			});
 
 			it("prefers typed positional tokens over named keys", () => {
@@ -354,6 +385,12 @@ component extends="wheels.wheelstest.system.BaseSpec" {
 		});
 
 		describe("parseTestArgs", () => {
+
+			it("lower-cases --db, since the core runner matches its dialect list case-sensitively", () => {
+				// `--db=MySQL` passed the case-insensitive choice check but the
+				// runner's listFind() missed it and used the default datasource.
+				expect(probe.$parseTestArgs({db: "MySQL"}).db).toBeWithCase("mysql");
+			});
 
 			it("defaults reporter=simple, db=sqlite, format=json, flags off, useTestDB on", () => {
 				var o = probe.$parseTestArgs({});

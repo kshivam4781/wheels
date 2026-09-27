@@ -292,7 +292,7 @@ component extends="modules.BaseModule" {
 	 */
 	private any function migrateArgSpec() {
 		return new services.ArgSpec()
-			.positional(name = "action", default = "latest", description = "Migration action: latest, up, down, info, doctor, forget, pretend, rename-system-tables, diff")
+			.positional(name = "action", default = "latest", choices = "latest,up,down,info,doctor,forget,pretend,rename-system-tables,diff", description = "Migration action: latest, up, down, info, doctor, forget, pretend, rename-system-tables, diff")
 			.positional(name = "version", default = "", description = "Version for forget/pretend")
 			.flag(name = "yes", default = false, description = "Confirm forget/pretend")
 			.flag(name = "dry-run", default = false, description = "Preview rename-system-tables without writing")
@@ -301,7 +301,8 @@ component extends="modules.BaseModule" {
 			.option(name = "hints", default = "", description = 'Rename hints JSON ({"renames":{"old":"new"}})')
 			.option(name = "threshold", default = "", description = "Heuristic rename threshold between 0 and 1")
 			.option(name = "name", default = "", description = "Migration name when writing a single-model diff")
-			.flag(name = "write", default = false, description = "Write migration file(s) instead of previewing");
+			.flag(name = "write", default = false, description = "Write migration file(s) instead of previewing")
+			.flag(name = "offline", default = false, description = "Accepted for script portability; migrate only talks to the local server, so it has no effect");
 	}
 
 	/**
@@ -353,10 +354,12 @@ component extends="modules.BaseModule" {
 	 * still reaches new()'s own handling. Public for specs.
 	 */
 	public struct function $createArgs(required struct coll) {
+		// Non-strict on purpose: create forwards every other key to new(), whose
+		// own parse is strict, so an unknown key still fails there (#2963).
 		var parsed = new services.ArgSpec()
 			.positional(name = "type")
 			.positional(name = "name")
-			.parse(arguments.coll);
+			.parse(arguments.coll, false);
 
 		var tokens = $positionalTokens(arguments.coll);
 		var remaining = [];
@@ -378,13 +381,62 @@ component extends="modules.BaseModule" {
 	}
 
 	/**
+	 * Exit non-zero when a /wheels/cli bridge command answered success:false
+	 * (or no JSON at all). Callers print the bridge's own explanation first;
+	 * this only turns the refusal into a failing exit — `migrate diff` on a
+	 * missing model and a refused `rename-system-tables` used to print red and
+	 * exit 0 (#2963). Public for specs; hidden from MCP by the $-prefix sweep.
+	 */
+	public void function $throwIfBridgeRefused(required struct parsed, required string message) {
+		if (!(arguments.parsed.success ?: false)) {
+			throw(type = "MigrationError", message = arguments.message);
+		}
+	}
+
+	/**
+	 * Throw for any key present with a NULL value. The stdio MCP transport
+	 * turns an empty JSON string into null, and copying a null into a CFML
+	 * struct drops the key — so a helper that copies the collection before
+	 * parse() would silently turn "no value" into "omitted" (#2963: upgrade
+	 * {dry-run: ""} reached apply). Call it before any such copy.
+	 */
+	private void function $rejectNullKeys(required struct coll) {
+		for (var key in arguments.coll) {
+			if (isNull(arguments.coll[key])) {
+				throw(type = "Wheels.InvalidArguments", message = "--#key# has no value.");
+			}
+		}
+	}
+
+	/**
+	 * Take a `-h` token out of the collection. `-h` is not a LuCLI flag shape
+	 * (single dash), so it arrives as a positional token, and a choice-checked
+	 * positional would reject it. Returns the remaining collection and
+	 * whether help was asked for.
+	 */
+	private struct function $takeShortHelp(required struct coll) {
+		$rejectNullKeys(arguments.coll);
+		var rest = {};
+		var help = false;
+		for (var key in arguments.coll) {
+			if (reFindNoCase("^arg\d+$", key) && isSimpleValue(arguments.coll[key]) && arguments.coll[key] == "-h") {
+				help = true;
+			} else {
+				rest[key] = arguments.coll[key];
+			}
+		}
+		return {coll = rest, help = help};
+	}
+
+	/**
 	 * The collection's positional token values (arg<N>) in numeric order.
 	 * LuCLI numbers them by global token index, so gaps are normal.
 	 */
 	private array function $positionalTokens(required struct coll) {
 		var indices = [];
 		for (var key in arguments.coll) {
-			if (reFindNoCase("^arg\d+$", key)) {
+			// Empty tokens are skipped, matching ArgSpec's positional binding.
+			if (reFindNoCase("^arg\d+$", key) && len(trim(toString(arguments.coll[key])))) {
 				arrayAppend(indices, val(mid(key, 4, len(key))));
 			}
 		}
@@ -407,16 +459,16 @@ component extends="modules.BaseModule" {
 	private any function seedArgSpec() {
 		return new services.ArgSpec()
 			.option(name = "environment", default = "", description = "Environment whose seed files run (defaults to the app's current environment)")
-			.option(name = "mode", default = "auto", description = "Seeding mode: auto (detect), convention (app/db/seeds.cfm), or generate (random test data)")
+			.option(name = "mode", default = "auto", choices = "auto,convention,generate", description = "Seeding mode: auto (detect), convention (app/db/seeds.cfm), or generate (random test data)")
 			.flag(name = "generate", default = false, description = "Shorthand for --mode=generate");
 	}
 
 	private any function testArgSpec() {
 		return new services.ArgSpec()
-			.option(name = "filter",    default = "", description = "Spec filter — a dotted directory or bundle path (e.g. tests.specs.models)")
+			.option(name = "filter",    default = "", description = "Spec directory to run, as a dotted path (e.g. tests.specs.models). Directories only — a single spec file's path discovers no bundles (##3083)")
 			.option(name = "directory", default = "", description = "Documented alias for --filter")
-			.option(name = "reporter",  default = "simple", description = "Output format: simple, json, or tap")
-			.option(name = "db",        default = "sqlite", description = "Database the suite runs against")
+			.option(name = "reporter",  default = "simple", choices = "simple,json,tap", description = "Output format: simple, json, or tap")
+			.option(name = "db",        default = "sqlite", choices = "sqlite,h2,mysql,postgres,sqlserver,sqlserver_cicd,oracle,cockroachdb", description = "--core only: the database the framework core suite runs against. The app suite ignores it and uses the app's test datasource")
 			.option(name = "base-path", default = "", description = "URL prefix the app is mounted under (e.g. /myapp). Auto-derived from WHEELS_SUBPATH or set(subpath=...) when omitted.")
 			.option(name = "timeout",   default = "", description = "Seconds to wait for the suite to finish (default 900). Also settable with WHEELS_TEST_TIMEOUT.")
 			.flag(name = "verbose", default = false, description = "Print per-spec detail instead of the summary rollup")
@@ -427,19 +479,19 @@ component extends="modules.BaseModule" {
 
 	private any function analyzeArgSpec() {
 		return new services.ArgSpec()
-			.positional(name = "target", default = "all", description = "What to analyze: all (default), models, controllers, or views");
+			.positional(name = "target", default = "all", choices = "all,models,controllers,views", description = "What to analyze: all (default), models, controllers, or views");
 	}
 
 	private any function destroyArgSpec() {
 		return new services.ArgSpec()
-			.positional(name = "type", default = "", description = "What to remove: resource, model, controller, or view")
+			.positional(name = "type", default = "", choices = "resource,model,controller,view", description = "What to remove: resource, model, controller, or view")
 			.positional(name = "name", default = "", description = "Name of the artifact to remove")
 			.flag(name = "force", default = false, description = "Skip the confirmation prompt");
 	}
 
 	private any function generateArgSpec() {
 		return new services.ArgSpec()
-			.positional(name = "type", required = true, description = "What to generate: model, controller, view, scaffold, migration, api-resource, route, test, property, helper, policy, snippets, admin, auth, or app")
+			.positional(name = "type", required = true, choices = "model,controller,view,scaffold,migration,api-resource,route,test,property,helper,policy,snippets,admin,auth,app", description = "What to generate: model, controller, view, scaffold, migration, api-resource, route, test, property, helper, policy, snippets, admin, auth, or app")
 			.positional(name = "name", description = "Artifact name (model/controller/resource name, or the app name for `generate app`)")
 			.positional(name = "attributes", description = "Column definitions for model/scaffold (space- or comma-delimited name:type pairs, e.g. 'title:string body:text')")
 			.flag(name = "dry-run", default = false, description = "Print the would-be paths and write nothing");
@@ -447,7 +499,7 @@ component extends="modules.BaseModule" {
 
 	private any function createArgSpec() {
 		return new services.ArgSpec()
-			.positional(name = "type", required = true, description = "What to create: app")
+			.positional(name = "type", required = true, choices = "app", description = "What to create: app")
 			.positional(name = "name", required = true, description = "Application name");
 	}
 
@@ -464,11 +516,19 @@ component extends="modules.BaseModule" {
 
 	private any function upgradeArgSpec() {
 		return new services.ArgSpec()
-			.positional(name = "subcommand", default = "", description = "Explicit verb required: `check` scans for breaking changes (read-only); `apply` swaps vendor/wheels/ with the CLI's bundled framework (backup first). Omitted/empty prints usage and never modifies files")
+			.positional(name = "subcommand", default = "", choices = "check,apply,help", description = "Explicit verb required: `check` scans for breaking changes (read-only); `apply` swaps vendor/wheels/ with the CLI's bundled framework (backup first). Omitted/empty prints usage and never modifies files")
 			.option(name = "to", default = "", description = "Target Wheels version. check: version to scan against (default: latest). apply: must match the CLI's bundled framework version")
-			.option(name = "format", default = "", description = "check only: set to json for machine-readable output")
+			.option(name = "format", default = "", choices = "text,json", description = "check only: text (default) or json for machine-readable output")
 			.flag(name = "strict", default = false, description = "check only: escalate advisory findings to a hard failure (non-zero exit) so CI can gate on them")
-			.flag(name = "nobackup", default = false, description = "apply only: skip the vendor/wheels.bak-<timestamp> backup of the existing framework");
+			.flag(name = "nobackup", default = false, description = "apply only: skip the vendor/wheels.bak-<timestamp> backup of the existing framework")
+			// CLI-only spellings read by parseUpgradeArgs, deliberately NOT
+			// advertised: `--no-backup` (LuCLI normalizes it to backup=false),
+			// `--help`/`-h`, and `--dry-run`, which neither verb supports and is
+			// accepted only so it can be refused with a nudge toward `check`.
+			.accept("backup")
+			.accept("help")
+			.accept("h")
+			.accept("dry-run");
 	}
 
 	private any function jobsArgSpec() {
@@ -483,7 +543,7 @@ component extends="modules.BaseModule" {
 
 	private any function dbArgSpec() {
 		return new services.ArgSpec()
-			.positional(name = "subcommand", default = "", description = "Database command: reset (run pending migrations, then reseed), status (applied vs pending migrations), or version (current schema version). Omitted prints usage")
+			.positional(name = "subcommand", default = "", choices = "reset,status,version", description = "Database command: reset (run pending migrations, then reseed), status (applied vs pending migrations), or version (current schema version). Omitted prints usage")
 			.flag(name = "force", default = false, description = "reset only: confirm the reset. Without it, reset prints a warning and changes nothing")
 			.flag(name = "skip-seed", default = false, description = "reset only: run migrations but skip reseeding")
 			.flag(name = "pending", default = false, description = "status only: list pending migrations only")
@@ -493,14 +553,16 @@ component extends="modules.BaseModule" {
 
 	private any function packagesArgSpec() {
 		return new services.ArgSpec()
-			.positional(name = "subcommand", default = "list", description = "Package verb: list (default), search, show, add (install a package; `install` is an alias), update, remove, registry, or help")
+			.positional(name = "subcommand", default = "list", choices = "list,search,show,add,install,update,remove,registry,help", description = "Package verb: list (default), search, show, add (install a package; `install` is an alias), update, remove, registry, or help")
 			.positional(name = "target", default = "", description = "search: the query. show/remove: the package name. add: name or name@version. update: the package name (omit with --all). registry: refresh or info")
 			.option(name = "tag", default = "", description = "list only: show only packages carrying this tag (pass as --tag=<tag>)")
 			.flag(name = "all", default = false, description = "update only: update every installed package")
 			.flag(name = "yes", default = false, description = "update only: confirm the update (required)")
 			.flag(name = "force", default = false, description = "add only: overwrite vendor/<name>/ if it already exists")
-			.flag(name = "help", default = false, description = "Print usage instead of running a verb")
-			.flag(name = "offline", default = false, description = "Refuse registry network access (cached registry data still works). Also set by WHEELS_OFFLINE=1");
+			.flag(name = "offline", default = false, description = "Refuse registry network access (cached registry data still works). Also set by WHEELS_OFFLINE=1")
+			// `help` is honoured from in-process callers but never advertised:
+			// LuCLI's MCP server intercepts any `help` key (see packages()).
+			.accept("help");
 	}
 
 	/**
@@ -741,6 +803,11 @@ component extends="modules.BaseModule" {
 				dryRun = true;
 			} else if (a == "--no-dry-run") {
 				dryRun = false;
+			} else if (a == "--offline" || a == "--no-offline") {
+				// Documented global flag (`wheels generate model User --offline`);
+				// generate makes no network calls, so it only reaches the offline
+				// state. Passed on, the generator rejected it as an unknown flag.
+				$consumeOfflineFlag(a == "--offline" ? [a] : []);
 			} else {
 				arrayAppend(cleaned, a);
 			}
@@ -1075,7 +1142,9 @@ component extends="modules.BaseModule" {
 			verbose = verbose,
 			ci = parsed.ci,
 			core = parsed.core,
-			db = parsed.db,
+			// The core runner matches its dialect list case-sensitively
+			// (runner.cfm), so `--db=MySQL` silently used the default datasource.
+			db = lCase(trim(parsed.db)),
 			dbExplicit = structKeyExists(arguments.coll, "db"),
 			useTestDB = parsed["test-db"],
 			basePath = parsed["base-path"],
@@ -1521,6 +1590,10 @@ component extends="modules.BaseModule" {
 	 * issue #2477 and `deployment/security-hardening.mdx`.
 	 */
 	public string function reload() {
+		// Validate arguments before touching the server (#2963): an unknown or
+		// valueless key must fail on its own, not behind "no server running".
+		var reloadOpts = parseConsoleArgs(structuredArgs(arguments));
+
 		// Write-side guard: reload mutates the running app's state, so it must
 		// target the server bound to THIS project — never a sibling app squatting
 		// a common port. Without lucee.json/.env port config we refuse the
@@ -1536,7 +1609,6 @@ component extends="modules.BaseModule" {
 		// Auto-detect the reload password from .env / config, but let an explicit
 		// `--password=<value>` override it (parity with `wheels console`). The
 		// auto-detect default is unchanged when no flag is given.
-		var reloadOpts = parseConsoleArgs(structuredArgs(arguments));
 		var password = len(reloadOpts.password) ? reloadOpts.password : detectReloadPassword();
 
 		// F5 fix: physically wipe the Lucee compiled-class cache before
@@ -1972,7 +2044,13 @@ component extends="modules.BaseModule" {
 	 * hint: Scaffold a new Wheels project directory
 	 */
 	public string function new() {
-		var opts = parseNewArgs(structuredArgs(arguments));
+		var newColl = structuredArgs(arguments);
+		var opts = parseNewArgs(newColl);
+		// --offline is a documented global flag: new() skips its update check.
+		// It was accepted but never consumed here, so only WHEELS_OFFLINE worked.
+		$consumeOfflineFlag(
+			structKeyExists(newColl, "offline") && compareNoCase(toString(newColl.offline), "true") == 0 ? ["--offline"] : []
+		);
 
 		if (opts.isEmpty) {
 			out("Usage: wheels new <appname> [options]", "yellow");
@@ -2069,7 +2147,7 @@ component extends="modules.BaseModule" {
 	private any function routesArgSpec() {
 		return new services.ArgSpec()
 			.option(name = "filter", default = "", description = "Show only routes whose name, pattern or controller##action contains this text (case-insensitive)")
-			.option(name = "format", default = "text", description = "Output format: text (aligned table) or json");
+			.option(name = "format", default = "text", choices = "text,json", description = "Output format: text (aligned table) or json");
 	}
 
 	public string function routes() {
@@ -2215,6 +2293,8 @@ component extends="modules.BaseModule" {
 	 * hint: Show framework version, environment, and configuration
 	 */
 	public string function info() {
+		// Takes no arguments; enforce the schema's additionalProperties:false (#2963).
+		new services.ArgSpec().parse(structuredArgs(arguments));
 		out("Wheels CLI v#super.version()#", "bold");
 		out("");
 
@@ -3161,15 +3241,9 @@ component extends="modules.BaseModule" {
 	 */
 	private struct function parseAnalyzeArgs(required struct coll) {
 		var parsed = analyzeArgSpec().parse(arguments.coll);
+		// analyzeArgSpec()'s choices reject an unknown target: Analysis.analyze()
+		// treats anything unrecognized as `all`, so a typo analyzed everything.
 		var target = lCase(trim(parsed.target));
-		// Analysis.analyze() treats any unknown target as `all`, so a typo
-		// (or an MCP client guessing a value) silently analyzed everything.
-		if (!listFind("all,models,controllers,views", target)) {
-			throw(
-				type = "Wheels.InvalidArguments",
-				message = "Unknown analyze target '#parsed.target#'. Valid targets: all, models, controllers, views."
-			);
-		}
 		return {
 			target = target,
 			// arg1 from the CLI, or target=... by name from an MCP tool call
@@ -3256,6 +3330,8 @@ component extends="modules.BaseModule" {
 	 * hint: Validate Wheels application code for common errors and anti-patterns
 	 */
 	public string function validate() {
+		// Takes no arguments; enforce the schema's additionalProperties:false (#2963).
+		new services.ArgSpec().parse(structuredArgs(arguments));
 		if (!directoryExists(variables.projectRoot & "/app")) {
 			out("No app/ directory found. Are you in a Wheels project?", "red");
 			// throw maps to non-zero exit; return "" would silently succeed.
@@ -3316,7 +3392,18 @@ component extends="modules.BaseModule" {
 		// The builder also declares the <type>/<name> positionals (for the MCP
 		// schema). The smart legacy-order reorder below reads typed tokens from
 		// the raw collection; parsed.type / parsed.name cover the by-name path.
-		var parsed = destroyArgSpec().parse(arguments.coll);
+		// Parse the named keys only: typed tokens go through the legacy
+		// reorder below (`destroy User` puts the NAME first), so binding them
+		// to <type> here would reject valid CLI forms. Named values (the MCP
+		// shape) are validated against the type choices by parse().
+		$rejectNullKeys(arguments.coll);
+		var namedOnly = {};
+		for (var key in arguments.coll) {
+			if (!reFindNoCase("^arg\d+$", key)) {
+				namedOnly[key] = arguments.coll[key];
+			}
+		}
+		var parsed = destroyArgSpec().parse(namedOnly);
 
 		// Collect positionals from every arg<n> value in numeric order. LuCLI
 		// numbers positionals by global token index, so a leading `--force`
@@ -3406,9 +3493,11 @@ component extends="modules.BaseModule" {
 		var type = opts.type;
 		var force = opts.force;
 
-		if (!listFindNoCase("resource,model,controller,view", type)) {
-			out("Unknown type: #type#. Valid types: resource, model, controller, view", "red");
-			return "";
+		var validTypes = destroyArgSpec().choicesFor("type");
+		if (!arrayFindNoCase(validTypes, type)) {
+			out("Unknown type: #type#. Valid types: #arrayToList(validTypes, ', ')#", "red");
+			// Non-zero exit: printing red and returning "" reported success (#2963).
+			throw(type = "Wheels.InvalidArguments", message = "Unknown destroy type: #type#. Valid types: #arrayToList(validTypes, ', ')#.");
 		}
 
 		var svc = getService("destroy");
@@ -3998,7 +4087,14 @@ component extends="modules.BaseModule" {
 	 *   wheels packages registry info
 	 */
 	public string function packages() {
-		var parsed = packagesArgSpec().parse(structuredArgs(arguments));
+		var coll = structuredArgs(arguments);
+		var shortHelp = $takeShortHelp(coll);
+		var parsed = packagesArgSpec().parse(shortHelp.coll);
+		// `--help` is deliberately NOT in packagesArgSpec(): LuCLI's MCP server
+		// intercepts ANY `help` key (even help=false, which clients send as the
+		// schema default) and prints the global CLI help instead of running the
+		// tool (#2963). Honour it here for in-process callers that pass it.
+		var helpFlag = structKeyExists(coll, "help") && isSimpleValue(coll.help) && compareNoCase(toString(coll.help), "true") == 0;
 		$consumeOfflineFlag(parsed.offline ? ["--offline"] : []);
 		var sub = len(trim(parsed.subcommand)) ? trim(parsed.subcommand) : "list";
 		var target = trim(parsed.target);
@@ -4021,10 +4117,8 @@ component extends="modules.BaseModule" {
 		// guarantees `wheels packages help`, `wheels packages --help`, and
 		// `wheels packages -h` all reach $packagesHelp().
 		//
-		// `-h` is not a LuCLI flag shape (single dash), so it arrives as a
-		// positional token — as the verb (`packages -h`) or after it
-		// (`packages list -h`).
-		if (parsed.help || sub == "help" || sub == "-h" || target == "-h") {
+		// `-h` (as the verb or after it) is taken out by $takeShortHelp().
+		if (helpFlag || shortHelp.help || sub == "help") {
 			return $packagesHelp();
 		}
 
@@ -4314,11 +4408,9 @@ component extends="modules.BaseModule" {
 				return dbStatus(opts);
 			case "version":
 				return dbVersion(opts);
-			default:
-				out("Unknown db command: #subcommand#", "red");
-				out("Valid commands: reset, status, version");
-				throw(type = "Wheels.InvalidArguments", message = "Unknown db command: #subcommand#");
 		}
+		// Unreachable: dbArgSpec()'s choices reject any other subcommand in parse().
+		return "";
 	}
 
 	// ─────────────────────────────────────────────────
@@ -4605,18 +4697,23 @@ component extends="modules.BaseModule" {
 	 * because no arg1 key exists.
 	 */
 	private struct function parseUpgradeArgs(required struct coll) {
-		var parsed = upgradeArgSpec().parse(arguments.coll);
+		var shortHelp = $takeShortHelp(arguments.coll);
+		var parsed = upgradeArgSpec().parse(shortHelp.coll);
 
-		var sub = parsed.subcommand;
-		if (!len(sub) && structKeyExists(arguments.coll, "subcommand") && isSimpleValue(arguments.coll.subcommand)) {
-			sub = arguments.coll.subcommand;
+		// The verb comes ONLY from parse(), which validated it against the
+		// choices. The old by-name fallback re-read coll.subcommand after
+		// validation, so {arg1: "", subcommand: "bogus"} reached apply (#2963).
+		// ArgSpec binds a named subcommand itself now; re-check the value that
+		// is actually dispatched anyway, since apply swaps vendor/wheels/.
+		var sub = lCase(trim(parsed.subcommand));
+		if (len(sub) && !arrayFindNoCase(upgradeArgSpec().choicesFor("subcommand"), sub)) {
+			throw(type = "Wheels.InvalidArguments", message = "Invalid value '#sub#' for subcommand. Valid values: check, apply, help.");
 		}
-		sub = lCase(trim(sub));
 
 		// --nobackup is the documented spelling, but LuCLI normalizes the
 		// conventional negation `--no-backup` to backup=false — honor both.
 		var doBackup = !parsed.nobackup;
-		if (structKeyExists(arguments.coll, "backup") && isSimpleValue(arguments.coll.backup) && arguments.coll.backup == "false") {
+		if (structKeyExists(arguments.coll, "backup") && isSimpleValue(arguments.coll.backup) && compareNoCase(toString(arguments.coll.backup), "false") == 0) {
 			doBackup = false;
 		}
 
@@ -4624,7 +4721,7 @@ component extends="modules.BaseModule" {
 			subcommand = sub,
 			isCheck = sub == "check",
 			isApply = sub == "apply",
-			wantsHelp = sub == "help" || sub == "-h"
+			wantsHelp = sub == "help" || shortHelp.help
 				|| (structKeyExists(arguments.coll, "help") && isSimpleValue(arguments.coll.help) && arguments.coll.help == "true")
 				|| (structKeyExists(arguments.coll, "h") && isSimpleValue(arguments.coll.h) && arguments.coll.h == "true"),
 			targetVersion = parsed.to,
@@ -4635,10 +4732,17 @@ component extends="modules.BaseModule" {
 			// --fail-level WARNING / Mix --warnings-as-errors.
 			strict = parsed.strict,
 			doBackup = doBackup,
-			sawTo = structKeyExists(arguments.coll, "to"),
-			sawDryRun = structKeyExists(arguments.coll, "dry-run"),
-			sawStrict = structKeyExists(arguments.coll, "strict"),
-			sawFormat = structKeyExists(arguments.coll, "format")
+			// "Passed" means a real value, not key presence: MCP clients send
+			// schema defaults, so apply {strict: false} was refused as
+			// "--strict is not supported by the apply verb" (#2963).
+			sawTo = len(trim(parsed.to)) > 0,
+			// --dry-run is not declared (neither verb supports it), so ANY value
+			// except an explicit false counts as passed and is refused on apply:
+			// `--dry-run=1` read as "not passed" reached the swap.
+			sawDryRun = structKeyExists(arguments.coll, "dry-run")
+				&& !(isSimpleValue(arguments.coll["dry-run"]) && compareNoCase(trim(toString(arguments.coll["dry-run"])), "false") == 0),
+			sawStrict = parsed.strict,
+			sawFormat = len(trim(parsed.format)) > 0
 		};
 	}
 
@@ -4678,7 +4782,18 @@ component extends="modules.BaseModule" {
 	 */
 	public string function upgrade() {
 		var coll = structuredArgs(arguments);
-		var opts = parseUpgradeArgs(coll);
+		var opts = {};
+		try {
+			opts = parseUpgradeArgs(coll);
+		} catch (Wheels.InvalidArguments e) {
+			// upgradeArgSpec()'s choices reject a typo'd verb before the
+			// branch below that prints the usage and steers to apply/check —
+			// keep that documented behaviour (guides: "prints the usage and
+			// then hard-errors") and still exit non-zero.
+			out(e.message, "red");
+			$printUpgradeHelp();
+			rethrow;
+		}
 
 		if (opts.wantsHelp) {
 			return $printUpgradeHelp();
@@ -4700,18 +4815,6 @@ component extends="modules.BaseModule" {
 
 		// ── Apply verb. Every refusal below fires before any file mutation.
 
-		// A positional that isn't check/apply/help is a typo'd subcommand.
-		// A typo'd verb must hard-stop rather than exit 0 looking like it
-		// did something (`wheels upgrade chekc` in a script should fail
-		// loudly, not print usage and report success).
-		if (!opts.isApply) {
-			out("Unknown upgrade subcommand: #opts.subcommand#", "red");
-			$printUpgradeHelp();
-			throw(
-				type = "Wheels.InvalidArguments",
-				message = "Unknown upgrade subcommand '#opts.subcommand#' — use `wheels upgrade apply` (swap the framework) or `wheels upgrade check` (read-only scan)."
-			);
-		}
 
 		// Check-only flags on the apply verb almost always mean the user
 		// wanted the scan — nudge toward it instead of mutating
@@ -4746,6 +4849,11 @@ component extends="modules.BaseModule" {
 			);
 		}
 
+		// Explicit guard for the destructive path: only a validated `apply`
+		// may reach the framework swap, whatever changes above (#2963).
+		if (!opts.isApply) {
+			throw(type = "Wheels.InvalidArguments", message = "Refusing to run upgrade apply for subcommand '#opts.subcommand#'.");
+		}
 		return runUpgradeApply(opts.targetVersion, opts.doBackup);
 	}
 
@@ -6125,8 +6233,8 @@ component extends="modules.BaseModule" {
 
 		if (!success) {
 			$printRenameFailures(renameResult);
-			return "";
 		}
+		$throwIfBridgeRefused(parsed, "Rename refused — see the errors above.");
 
 		// No-op path: legacy tables not present.
 		if (Len(renameResult.skipped ?: "")) {
@@ -6256,8 +6364,8 @@ component extends="modules.BaseModule" {
 		var parsed = isJSON(httpResult) ? deserializeJSON(httpResult) : {};
 		if (!(parsed.success ?: false)) {
 			out(parsed.message ?: "Diff failed.", "red");
-			return "";
 		}
+		$throwIfBridgeRefused(parsed, "Diff failed — see the message above.");
 
 		$renderDiffResult(parsed, opts.write);
 		return "";
@@ -7686,6 +7794,18 @@ component extends="modules.BaseModule" {
 			&& isBoolean(arguments.result.success)
 			&& !arguments.result.success
 		) {
+			return true;
+		}
+		// Anything else without counts is not a TestBox result either (e.g.
+		// an error document carrying only message/detail, which printed
+		// "0 passed" and exited 0) — it can never be a pass (#2963).
+		var hasCounts = false;
+		for (var countKey in ["totalPass", "totalFail", "totalError", "bundleStats"]) {
+			if (structKeyExists(arguments.result, countKey)) {
+				hasCounts = true;
+			}
+		}
+		if (!hasCounts) {
 			return true;
 		}
 		if (structKeyExists(arguments.result, "directoryRejected") && arguments.result.directoryRejected) {
