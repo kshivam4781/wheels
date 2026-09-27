@@ -126,6 +126,16 @@ component extends="wheels.wheelstest.system.BaseSpec" {
 					expect(out.count).toBe(7);
 				});
 
+				it("rejects a bare flag (name=true) for a string positional instead of using the default", () => {
+					// `wheels destroy --name` arrives as name=true. Falling back to
+					// the default is dangerous: MCP migrate {action: "true"} became
+					// the default action `latest` and would run migrations.
+					var spec = new cli.lucli.services.ArgSpec()
+						.positional(name = "action", default = "latest");
+					expect(() => spec.parse({"action": "true"})).toThrow(type = "Wheels.InvalidArguments");
+					expect(() => spec.parse({"action": true})).toThrow(type = "Wheels.InvalidArguments");
+				});
+
 				it("ignores a non-simple named value and keeps the default", () => {
 					var spec = new cli.lucli.services.ArgSpec()
 						.positional(name = "target", default = "all");

@@ -110,6 +110,17 @@ component {
 				// {type: "model"} arrives as type=model, never arg1. A typed
 				// positional token still wins; the name only fills a slot the
 				// tokens left unbound.
+				//
+				// A bare CLI `--name` arrives as name=true: a flag, not a value.
+				// It must ERROR, never fall back to the default — MCP
+				// migrate {action: "true"} falling back to `latest` would run
+				// migrations.
+				if (pSpec.type == "string" && compareNoCase(toString(arguments.coll[pSpec.name]), "true") == 0) {
+					throw(
+						type = "Wheels.InvalidArguments",
+						message = "<" & pSpec.name & "> needs a value, e.g. --" & pSpec.name & "=<value> (a bare --" & pSpec.name & " is a flag)."
+					);
+				}
 				result[pSpec.name] = $coerce(arguments.coll[pSpec.name], pSpec.type);
 			} else if (pSpec.required) {
 				throw(
