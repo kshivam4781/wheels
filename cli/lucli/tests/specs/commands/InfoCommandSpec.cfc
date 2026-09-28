@@ -46,7 +46,13 @@ component extends="wheels.wheelstest.system.BaseSpec" {
 		describe("wheels info", () => {
 
 			it("runs without error", () => {
-				mod.info();
+				// The server-status line probes ports; keep it off the real
+				// common ports so the run never touches a server it did not
+				// start (the fallback-port sentinel fails the suite if it does).
+				var infoMod = new cli.lucli.Module(cwd = variables.tempRoot);
+				prepareMock(infoMod);
+				infoMod.$("isPortOpen", false);
+				infoMod.info();
 				expect(true).toBeTrue();
 			});
 

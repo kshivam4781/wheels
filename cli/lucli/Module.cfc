@@ -1309,20 +1309,23 @@ component extends="modules.BaseModule" {
 	 */
 	public string function coverage() {
 		var opts = parseCoverageArgs(structuredArgs(arguments));
-		var serverPort = $requireRunningServer(
-			hints = [
-				"Coverage requires a running server bound to this project.",
-				"Start it with: wheels start"
-			],
-			requireProjectConfig = true
-		);
+		var serverPort = $requireOwnRunningServer([
+			"Coverage requires a running server bound to this project.",
+			"Start it with: wheels start"
+		]);
 		var appRoot = variables.projectRoot;
 		var svc = new services.coverage.CoverageService();
 		var instrumented = 0;
 		try {
 			instrumented = svc.$instrument(appRoot & "/app");
 			$purgeServerCfclasses();
-			var suite = svc.$runSuite(serverPort, opts.useTestDb);
+			// Through the CLI's own peer-checked transport, to the verified
+			// server's bound address (GHSA-x3cm-2j3q-jgg4).
+			var suiteResult = makeHttpRequestWithStatus(
+				requestUrl = $serverUrlBase(serverPort) & "/wheels/app/tests?format=json&coverage=true&useTestDB=" & (opts.useTestDb ? "true" : "false"),
+				readTimeout = 1800000
+			);
+			var suite = {status = suiteResult.statusCode, body = suiteResult.body};
 			var coverage = svc.$collect();
 			var rows = svc.$analyze(appRoot & "/app", coverage);
 			return svc.$report(rows, opts.top, instrumented, suite.status);
@@ -1669,16 +1672,12 @@ component extends="modules.BaseModule" {
 		var reloadOpts = parseConsoleArgs(structuredArgs(arguments));
 
 		// Write-side guard: reload mutates the running app's state, so it must
-		// target the server bound to THIS project — never a sibling app squatting
-		// a common port. Without lucee.json/.env port config we refuse the
-		// common-port fallback and error loudly.
-		var serverPort = $requireRunningServer(
-			hints = [
-				"Reload requires a running server bound to this project.",
-				"Set 'port' in lucee.json (or PORT in .env), then start with: wheels start"
-			],
-			requireProjectConfig = true
-		);
+		// target THIS project's own registered server — never a sibling app on a
+		// common port or on this project's configured port. It also carries the
+		// reload password, which must never reach an unverified server.
+		var serverPort = $requireOwnRunningServer([
+			"Reload requires this project's own server (started with: wheels start)."
+		]);
 
 		// Auto-detect the reload password from .env / config, but let an explicit
 		// `--password=<value>` override it (parity with `wheels console`). The
@@ -1702,10 +1701,14 @@ component extends="modules.BaseModule" {
 		// would collapse a real reload (302 -> 200 at `/`) into the same 200 a
 		// wrong-password page render produces. Failures print-then-throw per
 		// the #2941 exit-code convention so `wheels reload && ...` gates work.
-		var reloadUrl = "http://localhost:#serverPort#/?reload=true&password=#password#";
+		var reloadRequest = $buildReloadRequest($serverOrigin(serverPort) & "/", password);
 		var reloadState = { statusCode = 0 };
 		try {
-			reloadState.statusCode = makeHttpRequestWithStatus(reloadUrl, false).statusCode;
+			reloadState.statusCode = makeHttpRequestWithStatus(
+				requestUrl = reloadRequest.requestUrl,
+				followRedirects = false,
+				headers = reloadRequest.headers
+			).statusCode;
 		} catch (any e) {
 			out("Failed to reload: #e.message#", "red");
 			if (!len(password)) {
@@ -1713,7 +1716,7 @@ component extends="modules.BaseModule" {
 			}
 			throw(
 				type = "Wheels.ReloadFailed",
-				message = "Reload request to localhost:#serverPort# failed: #e.message#"
+				message = "Reload request to #$serverHostPort(serverPort)# failed: #e.message#"
 			);
 		}
 
@@ -1723,7 +1726,7 @@ component extends="modules.BaseModule" {
 			if (!len(password)) {
 				out("Hint: Set WHEELS_RELOAD_PASSWORD in .env or config/settings.cfm", "yellow");
 			}
-			verbose("URL: http://localhost:#serverPort#/?reload=true&password=***");
+			verbose("URL: #$serverOrigin(serverPort)#/?reload=true");
 			throw(type = "Wheels.ReloadFailed", message = verdict.message);
 		}
 
@@ -1737,7 +1740,7 @@ component extends="modules.BaseModule" {
 		// password silently serves the request without restarting
 		// (#3059 / #3062).
 		out("Note: an authorized reload re-fires onApplicationStart (re-runs config/services.cfm and the package loader). A missing or wrong reload password silently skips the restart.", "cyan");
-		verbose("URL: http://localhost:#serverPort#/?reload=true&password=***");
+		verbose("URL: #$serverOrigin(serverPort)#/?reload=true");
 		return "";
 	}
 
@@ -1841,7 +1844,7 @@ component extends="modules.BaseModule" {
 		if (engine == "rustcfml") {
 			var rustSvc = new services.rustcfml.RustCFMLEngine();
 			var rustState = rustSvc.start(variables.projectRoot, enginePort > 0 ? enginePort : 8513);
-			out("RustCFML server started (pid " & rustState.pid & ") at http://localhost:" & rustState.port, "green");
+			out("RustCFML server started (pid " & rustState.pid & ") at http://127.0.0.1:" & rustState.port, "green");
 			out("Log: " & rustState.log, "cyan");
 			return "";
 		}
@@ -2139,7 +2142,7 @@ component extends="modules.BaseModule" {
 				break;
 			case "start":
 				var st = svc.start(variables.projectRoot, val(opts.port));
-				out("RustCFML server started (pid " & st.pid & ") at http://localhost:" & st.port, "green");
+				out("RustCFML server started (pid " & st.pid & ") at http://127.0.0.1:" & st.port, "green");
 				out("Log: " & st.log, "cyan");
 				break;
 			case "stop":
@@ -2150,7 +2153,7 @@ component extends="modules.BaseModule" {
 			case "status":
 				var status = svc.status(variables.projectRoot);
 				if (status.running) {
-					out("RustCFML running (pid " & status.pid & ") at http://localhost:" & status.port, "green");
+					out("RustCFML running (pid " & status.pid & ") at http://127.0.0.1:" & status.port, "green");
 				} else {
 					out("No RustCFML server running for this project.", "yellow");
 				}
@@ -2823,7 +2826,7 @@ component extends="modules.BaseModule" {
 		var password = parseConsoleArgs(structuredArgs(arguments)).password;
 
 		// Detect server
-		var serverPort = $requireRunningServer([
+		var serverPort = $requireOwnRunningServer([
 			"The console requires a running server.",
 			"Start one with: wheels start"
 		]);
@@ -2865,7 +2868,7 @@ component extends="modules.BaseModule" {
 		// Banner
 		out("", "");
 		out("Wheels Console v#super.version()#", "bold");
-		out("Connected to localhost:#serverPort# (#wheelsEnv#) — Wheels #wheelsVersion#", "cyan");
+		out("Connected to #$serverHostPort(serverPort)# (#wheelsEnv#) — Wheels #wheelsVersion#", "cyan");
 		out("Type expressions to evaluate in your app context. /help for commands.", "");
 		out("", "");
 
@@ -3087,9 +3090,13 @@ component extends="modules.BaseModule" {
 					// Same 302-vs-200 honesty contract as the reload
 					// command (#3059) — but interactive, so failures
 					// print red instead of throwing.
-					var reloadUrl = "http://localhost:#arguments.serverPort#/?reload=true&password=#arguments.password#";
+					var reloadRequest = $buildReloadRequest($serverOrigin(arguments.serverPort) & "/", arguments.password);
 					var reloadVerdict = $evaluateReloadResponse(
-						makeHttpRequestWithStatus(reloadUrl, false).statusCode
+						makeHttpRequestWithStatus(
+							requestUrl = reloadRequest.requestUrl,
+							followRedirects = false,
+							headers = reloadRequest.headers
+						).statusCode
 					);
 					if (reloadVerdict.success) {
 						out("Application reloaded.", "green");
@@ -4658,13 +4665,10 @@ component extends="modules.BaseModule" {
 	 * identity (##2878) and POST + reload password (SEC-4 mutation gate).
 	 */
 	private string function runJobsWork(required struct opts) {
-		var serverPort = $requireRunningServer(
-			hints = [
-				"The job worker requires a running server bound to this project.",
-				"Set 'port' in lucee.json (or PORT in .env), then start with: wheels start"
-			],
-			requireProjectConfig = true
-		);
+		var serverPort = $requireOwnRunningServer([
+			"The job worker requires a running server bound to this project.",
+			"Start this project's own server with: wheels start (it registers the server as this project's)"
+		]);
 
 		var workUrl = "#$serverUrlBase(serverPort)#/wheels/cli?command=jobsProcessNext&format=json";
 		if (len(arguments.opts.queue)) {
@@ -5732,15 +5736,12 @@ component extends="modules.BaseModule" {
 		// Write-side guard: admin generation introspects this project's schema
 		// over the server, then writes the generated controller/views into cwd.
 		// Attaching to a sibling app on a common port would scaffold admin
-		// from the WRONG schema into the right project. Refuse the common-port
-		// fallback when no project-bound port is configured.
-		var serverPort = $requireRunningServer(
-			hints = [
-				"Admin generation introspects this project's schema — it requires a running server bound to this project.",
-				"Set 'port' in lucee.json (or PORT in .env), then start with: wheels start"
-			],
-			requireProjectConfig = true
-		);
+		// from the WRONG schema into the right project. Require this project's
+		// own registered server.
+		var serverPort = $requireOwnRunningServer([
+			"Admin generation introspects this project's schema — it requires a running server bound to this project.",
+			"Start this project's own server with: wheels start (it registers the server as this project's)"
+		]);
 
 		// Introspect the model via the server
 		out("Introspecting model: #modelName#...", "cyan");
@@ -6240,13 +6241,9 @@ component extends="modules.BaseModule" {
 	 */
 	private numeric function $resolveMigrationServerPort(required boolean mutatingAction) {
 		if (arguments.mutatingAction) {
-			return $requireRunningServer(
-				hints = [
-					"Migrations require a running server bound to this project.",
-					"Set 'port' in lucee.json (or PORT in .env), then start with: wheels start"
-				],
-				requireProjectConfig = true
-			);
+			return $requireOwnRunningServer([
+				"Migrations require this project's own server (started with: wheels start)."
+			]);
 		}
 
 		var serverPort = $requireRunningServer(
@@ -6256,15 +6253,8 @@ component extends="modules.BaseModule" {
 		// Transparency for the fallback attach: with no project-bound port
 		// we cannot prove the server on a common port belongs to this
 		// project — a sibling app's server would report the WRONG
-		// project's migration state. Say which port we attached to and
-		// how to pin it.
-		if (!detectServerPort(requireProjectConfig = true)) {
-			out(
-				"Attached to localhost:#serverPort# via the common-port fallback (no project-bound port in lucee.json / .env).",
-				"yellow"
-			);
-			out("If this is not this project's server, set 'port' in lucee.json (or PORT in .env) and re-run.", "yellow");
-		}
+		// project's migration state. detectServerPort() prints the
+		// "not verified as this project's" notice when it falls back.
 		return serverPort;
 	}
 
@@ -6313,13 +6303,10 @@ component extends="modules.BaseModule" {
 			return "";
 		}
 
-		var serverPort = $requireRunningServer(
-			hints = [
-				"Migration reconciliation requires a running server bound to this project.",
-				"Set 'port' in lucee.json (or PORT in .env), then start with: wheels start"
-			],
-			requireProjectConfig = true
-		);
+		var serverPort = $requireOwnRunningServer([
+			"Migration reconciliation requires a running server bound to this project.",
+			"Start this project's own server with: wheels start (it registers the server as this project's)"
+		]);
 
 		out("Running #verb# for version #version#...", "cyan");
 
@@ -6364,13 +6351,10 @@ component extends="modules.BaseModule" {
 	}
 
 	private string function runRenameSystemTables(boolean dryRun = false) {
-		var serverPort = $requireRunningServer(
-			hints = [
-				"Renaming system tables requires a running server bound to this project.",
-				"Set 'port' in lucee.json (or PORT in .env), then start with: wheels start"
-			],
-			requireProjectConfig = true
-		);
+		var serverPort = $requireOwnRunningServer([
+			"Renaming system tables requires a running server bound to this project.",
+			"Start this project's own server with: wheels start (it registers the server as this project's)"
+		]);
 
 		out(arguments.dryRun ? "Previewing system-table rename..." : "Renaming legacy c_o_r_e_* system tables to wheels_*...", "cyan");
 
@@ -6501,13 +6485,10 @@ component extends="modules.BaseModule" {
 	private string function runMigrationDiff(required array args) {
 		var opts = $parseMigrateDiffArgs(args);
 
-		var serverPort = $requireRunningServer(
-			hints = [
-				"Diffing migrations requires a running server bound to this project.",
-				"Set 'port' in lucee.json (or PORT in .env), then start with: wheels start"
-			],
-			requireProjectConfig = true
-		);
+		var serverPort = $requireOwnRunningServer([
+			"Diffing migrations requires a running server bound to this project.",
+			"Start this project's own server with: wheels start (it registers the server as this project's)"
+		]);
 
 		out(opts.write ? "Writing migration diff..." : "Previewing migration diff...", "cyan");
 
@@ -6895,13 +6876,10 @@ component extends="modules.BaseModule" {
 	// ── Seed Execution ──────────────────────────────
 
 	private string function runSeed(string mode = "auto", string environment = "") {
-		var serverPort = $requireRunningServer(
-			hints = [
-				"Seeding requires a running server bound to this project.",
-				"Set 'port' in lucee.json (or PORT in .env), then start with: wheels start"
-			],
-			requireProjectConfig = true
-		);
+		var serverPort = $requireOwnRunningServer([
+			"Seeding requires a running server bound to this project.",
+			"Start this project's own server with: wheels start (it registers the server as this project's)"
+		]);
 
 		out("Running database seeds...", "cyan");
 
@@ -10066,9 +10044,11 @@ component extends="modules.BaseModule" {
 		var envFile = variables.projectRoot & "/.env";
 		if (fileExists(envFile)) {
 			var envContent = fileRead(envFile);
-			var portMatch = reFindNoCase("PORT\s*=\s*(\d+)", envContent, 1, true);
-			if (arrayLen(portMatch.match) > 1 && isNumeric(portMatch.match[2])) {
-				var port = val(portMatch.match[2]);
+			// Anchored to a line start: an unanchored match let DB_PORT=3306
+			// (or any *PORT key above PORT=) be taken as the app's port.
+			var portMatch = reFindNoCase("(^|[\r\n])[ \t]*PORT[ \t]*=[ \t]*[""']?(\d+)", envContent, 1, true);
+			if (arrayLen(portMatch.match) > 2 && isNumeric(portMatch.match[3])) {
+				var port = val(portMatch.match[3]);
 				if (isPortOpen(port)) return port;
 			}
 		}
@@ -10089,9 +10069,14 @@ component extends="modules.BaseModule" {
 			return false;
 		}
 
-		// 4. Try common ports (read-side only).
+		// 4. Try common ports (read-side only). Whatever answers is NOT verified
+		//    as this project's server, so say so every time (GHSA-x3cm-2j3q-jgg4).
 		for (var fallbackPort in arguments.commonPorts) {
-			if (isPortOpen(fallbackPort)) return fallbackPort;
+			if (isPortOpen(fallbackPort)) {
+				out("Using the server on #$serverHostPort(fallbackPort)#, not verified as this project's (no server is running on this project's configured port).", "yellow");
+				out("If that is another app, start this project's server with: wheels start, or set WHEELS_SERVER_FALLBACK=false to turn this fallback off.", "yellow");
+				return fallbackPort;
+			}
 		}
 
 		return false;
@@ -10107,9 +10092,56 @@ component extends="modules.BaseModule" {
 	private string function $serverUrlBase(required numeric serverPort) {
 		var svc = new services.rustcfml.RustCFMLEngine();
 		if (svc.status(variables.projectRoot).running) {
-			return "http://localhost:#arguments.serverPort#/index.cfm";
+			return $serverOrigin(arguments.serverPort) & "/index.cfm";
 		}
-		return "http://localhost:#arguments.serverPort#";
+		return $serverOrigin(arguments.serverPort);
+	}
+
+	/**
+	 * `http://<host>:<port>` for the dev server on `serverPort`. The host is
+	 * the address that server actually binds when it has been verified as
+	 * this project's (see $recordVerifiedServer), otherwise 127.0.0.1. It is
+	 * never "localhost": resolving that can land on a different address
+	 * family than the server, where another process can listen on the same
+	 * port (GHSA-x3cm-2j3q-jgg4).
+	 */
+	private string function $serverOrigin(required numeric serverPort) {
+		return "http://" & $urlHost($serverHost(arguments.serverPort)) & ":" & arguments.serverPort;
+	}
+
+	/** host:port as shown to the user. */
+	private string function $serverHostPort(required numeric serverPort) {
+		return $urlHost($serverHost(arguments.serverPort)) & ":" & arguments.serverPort;
+	}
+
+	private string function $serverHost(required numeric serverPort) {
+		if (
+			structKeyExists(variables, "verifiedServers")
+			&& structKeyExists(variables.verifiedServers, arguments.serverPort)
+			&& arrayLen(variables.verifiedServers[arguments.serverPort].hosts)
+		) {
+			return variables.verifiedServers[arguments.serverPort].hosts[1];
+		}
+		return "127.0.0.1";
+	}
+
+	private string function $urlHost(required string host) {
+		return find(":", arguments.host) ? "[" & arguments.host & "]" : arguments.host;
+	}
+
+	/**
+	 * Remember that the server on `port` is this project's, served by `pid`
+	 * on `hosts`. Every later request to that port goes through
+	 * $httpExchange(), which checks on the very connection it is about to
+	 * use that `pid` accepted it, before writing anything.
+	 */
+	private void function $recordVerifiedServer(required struct own) {
+		if (!structKeyExists(variables, "verifiedServers")) variables.verifiedServers = {};
+		variables.verifiedServers[arguments.own.port] = {pid: arguments.own.pid, hosts: arguments.own.hosts};
+	}
+
+	private void function $forgetVerifiedServer(required numeric port) {
+		if (structKeyExists(variables, "verifiedServers")) structDelete(variables.verifiedServers, arguments.port);
 	}
 
 	/**
@@ -10125,8 +10157,25 @@ component extends="modules.BaseModule" {
 	 * port config errors loudly instead of attaching to a sibling app.
 	 */
 	private numeric function $requireRunningServer(array hints = [], boolean requireProjectConfig = false) {
+		// This project's own verified server, when there is one, wins: it is
+		// reached on the address it binds, and every request is peer-checked.
+		var own = $verifyOwnServer();
+		if (own.port > 0) {
+			$recordVerifiedServer(own);
+			return own.port;
+		}
 		var serverPort = detectServerPort(requireProjectConfig = arguments.requireProjectConfig);
-		if (serverPort) return serverPort;
+		if (serverPort) {
+			$forgetVerifiedServer(serverPort);
+			// Read-only callers may use a server they cannot verify, but must
+			// say so (GHSA-x3cm-2j3q-jgg4). detectServerPort() already printed
+			// the notice for a common-port fallback; this covers a server on
+			// the project's configured port that is not registered as its own.
+			if (serverPort == detectServerPort(requireProjectConfig = true)) {
+				out("Using the server on #$serverHostPort(serverPort)#, not verified as this project's (it is on this project's configured port but was not started for this project with: wheels start).", "yellow");
+			}
+			return serverPort;
+		}
 
 		out("No running Wheels server detected.", "red");
 		// Fallback hints used only when a caller passes none. Every current
@@ -10152,6 +10201,57 @@ component extends="modules.BaseModule" {
 	}
 
 	/**
+	 * The port of THIS project's own running server, or 0 when there is none
+	 * whose ownership can be proven: the RustCFML backend (project-bound by
+	 * construction) or a Lucee registration in the server registry whose
+	 * `.project-path` matches this project (see ServerRegistry.ownServerPort).
+	 */
+	private numeric function $ownServerPort() {
+		return $verifyOwnServer().port;
+	}
+
+	/**
+	 * `{port, reason}` for THIS project's own server (see
+	 * ServerRegistry.verifyOwnServer). A live pid is not proof on its own:
+	 * the RustCFML state file is checked the same way, so its recorded pid
+	 * must be the process listening on its recorded port.
+	 */
+	private struct function $verifyOwnServer() {
+		var registry = getService("serverRegistry");
+		var rustSvc = new services.rustcfml.RustCFMLEngine();
+		var rustStatus = rustSvc.status(variables.projectRoot);
+		var rustVerdict = {port: 0, reason: "not-registered", pid: "", hosts: []};
+		if (
+			rustStatus.running
+			&& structKeyExists(rustStatus, "port") && isNumeric(rustStatus.port) && rustStatus.port > 0
+			&& structKeyExists(rustStatus, "pid")
+		) {
+			// The recorded pid must BE this project's RustCFML server (a
+			// managed binary serving this project's public directory), not
+			// just some live process that happens to own the port.
+			if (!rustSvc.isProjectServerProcess(rustStatus.pid, variables.projectRoot)) {
+				rustVerdict.reason = "pid-not-server";
+			} else {
+				var owner = registry.listenerOwnedBy(rustStatus.port, rustStatus.pid);
+				if (owner == "yes") {
+					return {
+						port: rustStatus.port,
+						reason: "",
+						pid: rustStatus.pid,
+						hosts: registry.boundHosts(rustStatus.pid, rustStatus.port)
+					};
+				}
+				rustVerdict.reason = owner == "no" ? "listener-mismatch" : "unverifiable";
+			}
+		}
+		var luceeVerdict = registry.verifyOwnServer(variables.projectRoot);
+		if (luceeVerdict.port == 0 && luceeVerdict.reason == "not-registered") {
+			return rustVerdict;
+		}
+		return luceeVerdict;
+	}
+
+	/**
 	 * Guard for commands that must target THIS project's server, not a
 	 * sibling app squatting a common port. `wheels test` is the canonical
 	 * caller: attaching to the wrong server yields misleading spec-load
@@ -10163,19 +10263,33 @@ component extends="modules.BaseModule" {
 	 * `.project-path` matches this project (see ServerRegistry.ownServerPort).
 	 */
 	private numeric function $requireOwnRunningServer(required array hints) {
-		// RustCFML backend is project-bound by construction.
-		var rustSvc = new services.rustcfml.RustCFMLEngine();
-		var rustStatus = rustSvc.status(variables.projectRoot);
-		if (rustStatus.running && structKeyExists(rustStatus, "port") && rustStatus.port > 0) {
-			return rustStatus.port;
+		var own = $verifyOwnServer();
+		if (own.port > 0) {
+			$recordVerifiedServer(own);
+			return own.port;
 		}
-
-		// Lucee: only the project's OWN registered, alive server qualifies.
-		var ownPort = getService("serverRegistry").ownServerPort(variables.projectRoot);
-		if (ownPort > 0) return ownPort;
 
 		for (var hint in arguments.hints) {
 			out(hint, "yellow");
+		}
+		if (own.reason == "unverifiable") {
+			throw(
+				type = "Wheels.ServerNotOwned",
+				message = "Wheels could not verify which process is listening on this project's registered server port (no /proc, lsof or netstat available), so it will not send it this command or the reload password."
+			);
+		}
+		if (own.reason == "listener-mismatch" || own.reason == "pid-not-server") {
+			out("This project's server registration is stale: the recorded process is not the one serving its port.", "yellow");
+		}
+		// Something answering on this project's configured port is NOT proof it
+		// is this project's server (GHSA-x3cm-2j3q-jgg4): another app can hold
+		// the same port (every app defaults to 8080). Refuse, and name the port.
+		var configuredPort = detectServerPort(requireProjectConfig = true);
+		if (isNumeric(configuredPort) && configuredPort > 0) {
+			throw(
+				type = "Wheels.ServerNotOwned",
+				message = "The server on port #configuredPort# (this project's configured port) is not registered as this project's server, so Wheels will not send it this command or the reload password. If it is this project's server, restart it with: wheels start. Otherwise stop whatever is using port #configuredPort#, or give this project a different port in lucee.json."
+			);
 		}
 		throw(
 			type="Wheels.ServerNotRunning",
@@ -10193,9 +10307,12 @@ component extends="modules.BaseModule" {
 		var envFile = variables.projectRoot & "/.env";
 		if (fileExists(envFile)) {
 			var envContent = fileRead(envFile);
-			var pwMatch = reFindNoCase("(?:WHEELS_)?RELOAD_PASSWORD\s*=\s*([^\r\n]+)", envContent, 1, true);
-			if (arrayLen(pwMatch.match) > 1 && len(trim(pwMatch.match[2]))) {
-				return trim(pwMatch.match[2]);
+			// Anchored to a line start, like the PORT match: an unanchored
+			// match took MY_RELOAD_PASSWORD= (or a commented-out line) as the
+			// app's secret.
+			var pwMatch = reFindNoCase("(^|[\r\n])[ \t]*(?:WHEELS_)?RELOAD_PASSWORD[ \t]*=[ \t]*([^\r\n]+)", envContent, 1, true);
+			if (arrayLen(pwMatch.match) > 2 && len(trim(pwMatch.match[3]))) {
+				return trim(pwMatch.match[3]);
 			}
 		}
 
@@ -10346,6 +10463,58 @@ component extends="modules.BaseModule" {
 	}
 
 	/**
+	 * Build a `?reload=true` request for THIS project's own server. Every
+	 * caller (reload, console /reload, wheels test) runs only after
+	 * $requireOwnRunningServer(), so the password never goes to a server
+	 * that has not been verified as this project's.
+	 *
+	 * The password travels in the X-Wheels-Reload-Password header, keeping it
+	 * out of the URL and so out of access and proxy logs. An app whose
+	 * public/Application.cfc predates header support only reads
+	 * ?password=, so for those the password goes in the query string (still
+	 * only to the verified server) with a notice on how to upgrade.
+	 *
+	 * Public ONLY so ReloadCommandSpec can unit-test the transport choice
+	 * (same carve-out as $evaluateReloadResponse).
+	 */
+	public struct function $buildReloadRequest(required string baseUrl, required string password) {
+		var reloadRequest = {
+			requestUrl = arguments.baseUrl & (find("?", arguments.baseUrl) ? "&" : "?") & "reload=true",
+			headers = {}
+		};
+		if (!len(arguments.password)) {
+			return reloadRequest;
+		}
+		if (reFind("[^\x20-\x7E]", arguments.password)) {
+			// An HTTP header carries only Latin-1 on the wire, so a password
+			// with other characters would arrive mangled and be refused. The
+			// server also accepts ?password=, so send it that way, still only to
+			// the verified server.
+			reloadRequest.requestUrl &= "&password=" & urlEncodedFormat(arguments.password);
+			out("Note: the reload password contains characters an HTTP header cannot carry, so it was sent in the URL. Use a password of plain ASCII characters to keep it out of server logs.", "yellow");
+		} else if ($appReadsReloadPasswordHeader()) {
+			reloadRequest.headers["X-Wheels-Reload-Password"] = arguments.password;
+		} else {
+			reloadRequest.requestUrl &= "&password=" & urlEncodedFormat(arguments.password);
+			out("Note: this app's public/Application.cfc does not accept the reload password in a header, so it was sent in the URL. Update public/Application.cfc from the current Wheels template to keep the password out of server logs.", "yellow");
+		}
+		return reloadRequest;
+	}
+
+	/**
+	 * Does this project's public/Application.cfc map the
+	 * X-Wheels-Reload-Password header onto url.password? Comments are
+	 * stripped first so a commented-out mention does not count.
+	 */
+	private boolean function $appReadsReloadPasswordHeader() {
+		var appCfc = variables.projectRoot & "/public/Application.cfc";
+		if (!fileExists(appCfc)) {
+			return false;
+		}
+		return findNoCase("cgi.http_x_wheels_reload_password", stripCfmlComments(fileRead(appCfc))) > 0;
+	}
+
+	/**
 	 * Restart the isolated `_wheelsTest` application scope before an app test
 	 * run. See runTests() for the why (RETEST-2461 B).
 	 *
@@ -10367,10 +10536,14 @@ component extends="modules.BaseModule" {
 		if (!len(password)) {
 			return false;
 		}
-		var reloadUrl = "#$serverUrlBase(serverPort)##testPath#?reload=true&password=#urlEncodedFormat(password)#";
+		var reloadRequest = $buildReloadRequest("#$serverUrlBase(serverPort)##testPath#", password);
 		var reloadState = { statusCode = 0 };
 		try {
-			reloadState = makeHttpRequestWithStatus(reloadUrl, false);
+			reloadState = makeHttpRequestWithStatus(
+				requestUrl = reloadRequest.requestUrl,
+				followRedirects = false,
+				headers = reloadRequest.headers
+			);
 		} catch (any e) {
 			out("Note: could not reload the isolated test application (#e.message#).", "yellow");
 			return false;
@@ -10386,10 +10559,12 @@ component extends="modules.BaseModule" {
 	 * Check if a port is responding to HTTP requests
 	 */
 	private boolean function isPortOpen(required numeric port) {
+		// The loopback address the unverified request path will use
+		// ($serverOrigin), never "localhost" (GHSA-x3cm-2j3q-jgg4).
 		try {
 			var socket = createObject("java", "java.net.Socket");
 			socket.init();
-			var address = createObject("java", "java.net.InetSocketAddress").init("localhost", javacast("int", port));
+			var address = createObject("java", "java.net.InetSocketAddress").init($serverHost(arguments.port), javacast("int", arguments.port));
 			socket.connect(address, javacast("int", 1000));
 			socket.close();
 			return true;
@@ -10482,30 +10657,16 @@ component extends="modules.BaseModule" {
 	private struct function makeHttpRequestWithStatus(
 		required string requestUrl,
 		boolean followRedirects = true,
-		numeric readTimeout = 120000
+		numeric readTimeout = 120000,
+		struct headers = {}
 	) {
-		var javaUrl = createObject("java", "java.net.URL").init(arguments.requestUrl);
-		var conn = javaUrl.openConnection();
-		conn.setRequestMethod("GET");
-		conn.setInstanceFollowRedirects(javacast("boolean", arguments.followRedirects));
-		conn.setConnectTimeout(5000);
-		conn.setReadTimeout(javacast("int", arguments.readTimeout));
-
-		var responseCode = conn.getResponseCode();
-		var inputStream = responseCode >= 400 ? conn.getErrorStream() : conn.getInputStream();
-		// getErrorStream() returns Java null on a bodiless 4xx/5xx response;
-		// Scanner.init(null) NPEs on Lucee and surfaces as a useless "null"
-		// error message (#2947 review, #2977). No body — return empty.
-		if (isNull(inputStream)) {
-			return { statusCode = responseCode, body = "" };
-		}
-		var scanner = createObject("java", "java.util.Scanner").init(inputStream, "UTF-8");
-		var response = "";
-		while (scanner.hasNextLine()) {
-			response &= scanner.nextLine() & chr(10);
-		}
-		scanner.close();
-		return { statusCode = responseCode, body = trim(response) };
+		var result = $httpExchange(
+			requestUrl = arguments.requestUrl,
+			headers = arguments.headers,
+			followRedirects = arguments.followRedirects,
+			readTimeout = arguments.readTimeout
+		);
+		return {statusCode = result.statusCode, body = trim(result.body)};
 	}
 
 	/**
@@ -10517,70 +10678,259 @@ component extends="modules.BaseModule" {
 	 * field to keep it out of the URL and access logs.
 	 */
 	private string function makeBridgePost(required string requestUrl) {
-		var javaUrl = createObject("java", "java.net.URL").init(arguments.requestUrl);
-		var conn = javaUrl.openConnection();
-		conn.setRequestMethod("POST");
-		conn.setConnectTimeout(5000);
-		conn.setReadTimeout(120000);
-		conn.setDoOutput(true);
-		conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-
-		var writer = createObject("java", "java.io.OutputStreamWriter").init(conn.getOutputStream(), "UTF-8");
-		writer.write("password=" & urlEncodedFormat(detectReloadPassword()));
-		writer.flush();
-		writer.close();
-
-		var responseCode = conn.getResponseCode();
-		var inputStream = responseCode >= 400 ? conn.getErrorStream() : conn.getInputStream();
-		// getErrorStream() returns Java null on a bodiless 4xx/5xx response;
-		// Scanner.init(null) NPEs on Lucee and surfaces as a useless "null"
-		// error message (#2947 review, #2977). No body — return empty.
-		if (isNull(inputStream)) {
-			return "";
-		}
-		var scanner = createObject("java", "java.util.Scanner").init(inputStream, "UTF-8");
-		var response = "";
-		while (scanner.hasNextLine()) {
-			response &= scanner.nextLine() & chr(10);
-		}
-		scanner.close();
-		return trim(response);
+		var result = $httpExchange(
+			requestUrl = arguments.requestUrl,
+			method = "POST",
+			headers = {"Content-Type": "application/x-www-form-urlencoded"},
+			body = "password=" & urlEncodedFormat(detectReloadPassword())
+		);
+		return trim(result.body);
 	}
 
 	/**
 	 * Make an HTTP POST request with a JSON body and return the response
 	 */
 	private string function makeHttpPost(required string requestUrl, required string body) {
-		var javaUrl = createObject("java", "java.net.URL").init(arguments.requestUrl);
-		var conn = javaUrl.openConnection();
-		conn.setRequestMethod("POST");
-		conn.setConnectTimeout(5000);
-		conn.setReadTimeout(30000);
-		conn.setDoOutput(true);
-		conn.setRequestProperty("Content-Type", "application/json");
+		var result = $httpExchange(
+			requestUrl = arguments.requestUrl,
+			method = "POST",
+			headers = {"Content-Type": "application/json"},
+			body = arguments.body,
+			readTimeout = 30000
+		);
+		return trim(result.body);
+	}
 
-		// Write request body
-		var writer = createObject("java", "java.io.OutputStreamWriter").init(conn.getOutputStream(), "UTF-8");
-		writer.write(body);
-		writer.flush();
-		writer.close();
+	/**
+	 * The one HTTP transport the CLI uses to talk to the dev server.
+	 *
+	 * A raw socket, so the connection the request travels on is one the CLI
+	 * controls (GHSA-x3cm-2j3q-jgg4). When the port belongs to a server
+	 * verified as this project's ($recordVerifiedServer), the CLI first
+	 * checks, on THIS connection, that the server's own pid accepted it
+	 * (ServerRegistry.peerHeldBy), and only then writes the request and any
+	 * secret in it. A connection accepted by anything else, including a
+	 * process owned by another OS user that lsof cannot see, never receives
+	 * a byte, and the command fails closed with Wheels.ServerNotOwned.
+	 *
+	 * Returns {statusCode, body, headers}. HTTP/1.1 with Connection: close;
+	 * handles Content-Length, chunked and read-to-EOF bodies, and follows
+	 * same-origin redirects when followRedirects is true.
+	 */
+	public struct function $httpExchange(
+		required string requestUrl,
+		string method = "GET",
+		struct headers = {},
+		string body = "",
+		boolean followRedirects = true,
+		numeric readTimeout = 120000,
+		numeric redirectsLeft = 5
+	) {
+		var uri = createObject("java", "java.net.URI").init(arguments.requestUrl);
+		var host = replace(replace(uri.getHost(), "[", ""), "]", "");
+		var port = uri.getPort() > 0 ? uri.getPort() : 80;
+		var target = (len(uri.getRawPath()) ? uri.getRawPath() : "/") & (isNull(uri.getRawQuery()) ? "" : "?" & uri.getRawQuery());
 
-		// Read response (handle both success and error streams)
-		var responseCode = conn.getResponseCode();
-		var inputStream = responseCode >= 400 ? conn.getErrorStream() : conn.getInputStream();
-		// getErrorStream() returns Java null on a bodiless 4xx/5xx response;
-		// Scanner.init(null) NPEs on Lucee and surfaces as a useless "null"
-		// error message (#2947 review, #2977). No body — return empty.
-		if (isNull(inputStream)) {
-			return "";
+		var verified = structKeyExists(variables, "verifiedServers") && structKeyExists(variables.verifiedServers, port)
+			? variables.verifiedServers[port]
+			: {};
+		var candidates = [host];
+		if (structCount(verified)) {
+			for (var h in verified.hosts) {
+				if (!arrayFindNoCase(candidates, h)) arrayAppend(candidates, h);
+			}
 		}
-		var scanner = createObject("java", "java.util.Scanner").init(inputStream, "UTF-8");
-		var response = "";
-		while (scanner.hasNextLine()) {
-			response &= scanner.nextLine() & chr(10);
+
+		var sock = "";
+		var lastError = "";
+		for (var candidate in candidates) {
+			try {
+				sock = createObject("java", "java.net.Socket").init();
+				sock.connect(createObject("java", "java.net.InetSocketAddress").init(candidate, javaCast("int", port)), javaCast("int", 5000));
+				host = candidate;
+				break;
+			} catch (any e) {
+				lastError = e.message;
+				sock = "";
+			}
 		}
-		scanner.close();
-		return trim(response);
+		if (isSimpleValue(sock)) {
+			throw(type = "Wheels.HttpConnectFailed", message = "Could not connect to #$urlHost(host)#:#port#: #lastError#");
+		}
+
+		try {
+			sock.setSoTimeout(javaCast("int", arguments.readTimeout));
+			if (structCount(verified)) {
+				$assertPeerIsServer(sock, port, verified.pid, host);
+			}
+
+			var crlf = chr(13) & chr(10);
+			var bodyBytes = charsetDecode(arguments.body, "utf-8");
+			var head = uCase(arguments.method) & " " & target & " HTTP/1.1" & crlf
+				& "Host: " & $urlHost(host) & ":" & port & crlf
+				& "User-Agent: wheels-cli" & crlf
+				& "Accept: */*" & crlf
+				& "Connection: close" & crlf;
+			for (var headerName in arguments.headers) {
+				head &= headerName & ": " & arguments.headers[headerName] & crlf;
+			}
+			if (len(bodyBytes) || uCase(arguments.method) == "POST") {
+				head &= "Content-Length: " & len(bodyBytes) & crlf;
+			}
+			head &= crlf;
+			var outStream = sock.getOutputStream();
+			outStream.write(charsetDecode(head, "iso-8859-1"));
+			if (len(bodyBytes)) outStream.write(bodyBytes);
+			outStream.flush();
+
+			var response = $readHttpResponse(sock.getInputStream(), uCase(arguments.method) == "HEAD");
+		} finally {
+			try { sock.close(); } catch (any e) {}
+		}
+
+		if (
+			arguments.followRedirects
+			&& arguments.redirectsLeft > 0
+			&& listFind("301,302,303,307,308", response.statusCode)
+			&& structKeyExists(response.headers, "location")
+		) {
+			var next = uri.resolve(response.headers.location);
+			var nextHost = replace(replace(isNull(next.getHost()) ? "" : next.getHost(), "[", ""), "]", "");
+			var nextPort = next.getPort() > 0 ? next.getPort() : 80;
+			// Same origin only: a redirect must not carry the CLI (or a
+			// secret) to another server.
+			if (nextPort == port && (nextHost == host || arrayFindNoCase(candidates, nextHost))) {
+				var keepBody = listFind("307,308", response.statusCode) > 0;
+				return $httpExchange(
+					requestUrl = "http://" & $urlHost(host) & ":" & port & next.getRawPath() & (isNull(next.getRawQuery()) ? "" : "?" & next.getRawQuery()),
+					method = keepBody ? arguments.method : "GET",
+					headers = keepBody ? arguments.headers : {},
+					body = keepBody ? arguments.body : "",
+					followRedirects = true,
+					readTimeout = arguments.readTimeout,
+					redirectsLeft = arguments.redirectsLeft - 1
+				);
+			}
+		}
+		return response;
+	}
+
+	/**
+	 * Fail closed unless process `pid` holds the server end of `sock`.
+	 * The server may not have accept()ed yet, so poll briefly.
+	 */
+	private void function $assertPeerIsServer(required any sock, required numeric port, required string pid, required string host) {
+		var registry = getService("serverRegistry");
+		var clientPort = arguments.sock.getLocalPort();
+		var verdict = "no";
+		var deadline = getTickCount() + 3000;
+		while (true) {
+			verdict = registry.peerHeldBy(arguments.pid, arguments.port, clientPort);
+			if (verdict != "no" || getTickCount() > deadline) break;
+			sleep(50);
+		}
+		if (verdict == "yes") return;
+		try { arguments.sock.close(); } catch (any e) {}
+		throw(
+			type = "Wheels.ServerNotOwned",
+			message = verdict == "unknown"
+				? "Wheels could not verify which process accepted its connection to #$urlHost(arguments.host)#:#arguments.port#, so it sent nothing."
+				: "The connection to #$urlHost(arguments.host)#:#arguments.port# was accepted by a process other than this project's server (pid #arguments.pid#), so Wheels sent nothing. Another program is listening on that port; stop it, or restart this project's server with: wheels start."
+		);
+	}
+
+	/**
+	 * Parse an HTTP/1.x response from `input` into {statusCode, body, headers}.
+	 * Interim 1xx responses (100 Continue, 102, 103) are skipped to the final
+	 * one. A response cut short (EOF before the headers end, before
+	 * Content-Length bytes, or before the last chunk) throws
+	 * Wheels.HttpResponseTruncated instead of returning a partial body that
+	 * could read as success.
+	 */
+	private struct function $readHttpResponse(required any input, boolean headOnly = false) {
+		var stream = createObject("java", "java.io.BufferedInputStream").init(arguments.input);
+		stream.mark(1);
+		if (stream.read() == -1) {
+			throw(type = "Wheels.HttpNoResponse", message = "The server closed the connection without sending any response.");
+		}
+		stream.reset();
+		var statusCode = 0;
+		var headers = {};
+		while (true) {
+			var statusLine = $readHttpLine(stream);
+			if (!reFind("^HTTP/\d(\.\d)? \d{3}", statusLine)) {
+				throw(type = "Wheels.HttpResponseInvalid", message = "The server sent an invalid HTTP status line: " & left(statusLine, 80));
+			}
+			statusCode = val(listGetAt(statusLine, 2, " "));
+			headers = {};
+			while (true) {
+				var line = $readHttpLine(stream);
+				if (!len(line)) break;
+				var colon = find(":", line);
+				if (colon > 1) headers[lCase(trim(left(line, colon - 1)))] = trim(mid(line, colon + 1, len(line)));
+			}
+			if (statusCode < 100 || statusCode >= 200 || statusCode == 101) break;
+		}
+
+		var bytes = createObject("java", "java.io.ByteArrayOutputStream").init();
+		var noBody = arguments.headOnly || statusCode == 204 || statusCode == 304 || statusCode == 101;
+		if (!noBody) {
+			if (findNoCase("chunked", headers["transfer-encoding"] ?: "")) {
+				while (true) {
+					var sizeText = trim(listFirst($readHttpLine(stream) & ";", ";"));
+					if (!reFind("^[0-9A-Fa-f]+$", sizeText)) {
+						throw(type = "Wheels.HttpResponseInvalid", message = "The server sent an invalid chunk size: " & left(sizeText, 40));
+					}
+					var size = inputBaseN(sizeText, 16);
+					if (size == 0) {
+						// Trailer section, ended by an empty line.
+						while (len($readHttpLine(stream))) {}
+						break;
+					}
+					bytes.write($readExactly(stream, size));
+					if (len($readHttpLine(stream))) {
+						throw(type = "Wheels.HttpResponseInvalid", message = "The server sent a chunk without its terminating CRLF.");
+					}
+				}
+			} else if (structKeyExists(headers, "content-length")) {
+				if (!reFind("^\d+$", headers["content-length"])) {
+					throw(type = "Wheels.HttpResponseInvalid", message = "The server sent an invalid Content-Length: " & headers["content-length"]);
+				}
+				bytes.write($readExactly(stream, val(headers["content-length"])));
+			} else {
+				bytes.write(stream.readAllBytes());
+			}
+		}
+		return {statusCode = statusCode, body = bytes.toString("UTF-8"), headers = headers};
+	}
+
+	/** Exactly `count` bytes, or Wheels.HttpResponseTruncated. */
+	private any function $readExactly(required any stream, required numeric count) {
+		var data = arguments.stream.readNBytes(javaCast("int", arguments.count));
+		if (arrayLen(data) < arguments.count) {
+			throw(
+				type = "Wheels.HttpResponseTruncated",
+				message = "The server closed the connection after #arrayLen(data)# of #arguments.count# bytes; the response is incomplete."
+			);
+		}
+		return data;
+	}
+
+	/**
+	 * One CRLF- (or LF-) terminated line, without the terminator. EOF before
+	 * the terminator means the response was cut short.
+	 */
+	private string function $readHttpLine(required any stream) {
+		var sb = createObject("java", "java.lang.StringBuilder").init();
+		while (true) {
+			var b = arguments.stream.read();
+			if (b == -1) {
+				throw(type = "Wheels.HttpResponseTruncated", message = "The server closed the connection in the middle of the response headers or chunk framing.");
+			}
+			if (b == 10) break;
+			if (b != 13) sb.append(chr(b));
+		}
+		return sb.toString();
 	}
 
 	/**
@@ -10859,7 +11209,11 @@ component extends="modules.BaseModule" {
 		out("Directory: #directory#");
 		out("");
 
-		var serverPort = $getServerPort();
+		// The app suite evaluates code and changes state, so it runs only on
+		// this project's own verified server, like `wheels test`.
+		var serverPort = $requireOwnRunningServer([
+			"Browser tests require this project's own server (started with: wheels start)."
+		]);
 		// Hit the APP test runner (`/wheels/app/tests`), not the framework's
 		// core test runner (`/wheels/core/tests`). The latter only knows
 		// about specs under `vendor/wheels/tests/specs/`. Apps live under
@@ -11119,18 +11473,6 @@ component extends="modules.BaseModule" {
 		return lCase(
 			createObject("java", "java.util.HexFormat").of().formatHex(digest)
 		);
-	}
-
-	private string function $getServerPort() {
-		try {
-			if (
-				structKeyExists(server, "lucli")
-				&& structKeyExists(server.lucli, "port")
-			) {
-				return server.lucli.port;
-			}
-		} catch (any e) {}
-		return detectServerPort() ?: "8080";
 	}
 
 	/**

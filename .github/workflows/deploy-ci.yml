@@ -78,7 +78,7 @@ jobs:
           #   vendor/wheels/migrator/, Seeder.cfc, JobWorker.cfc  what CliBridge calls
           # Wider framework boot breakage is caught by the core suite, which is
           # required on its own.
-          PATTERN='^(cli/lucli/|tools/test-cli-local\.sh$|tools/ci/testbox_results\.py$|tools/ci/test_testbox_results\.py$|tools/ci/fixtures/testbox/|tools/deploy-[^/]*\.sh$|tools/deploy-dry-run-normalize\.py$|\.github/workflows/deploy-ci\.yml$|\.github/actions/setup-lucli/|tools/lucli\.json$|lucee\.json$|public/|config/|app/(events|global|migrator)/|vendor/wheels/(public/|Public\.cfc$|events/|wheelstest/|migrator/|Seeder\.cfc$|JobWorker\.cfc$))'
+          PATTERN='^(cli/lucli/|tools/test-cli-local\.sh$|tools/ci/testbox_results\.py$|tools/ci/test_testbox_results\.py$|tools/ci/fallback_port_sentinel\.py$|tools/ci/test_fallback_port_sentinel\.py$|tools/ci/fixtures/testbox/|tools/deploy-[^/]*\.sh$|tools/deploy-dry-run-normalize\.py$|\.github/workflows/deploy-ci\.yml$|\.github/actions/setup-lucli/|tools/lucli\.json$|lucee\.json$|public/|config/|app/(events|global|migrator)/|vendor/wheels/(public/|Public\.cfc$|events/|wheelstest/|migrator/|Seeder\.cfc$|JobWorker\.cfc$))'
           if [ "$EVENT_NAME" = "pull_request" ]; then
             # fetch-depth: 0 already holds the base commit; fetch it (with full
             # history, never --depth) only if it is somehow missing.
@@ -114,7 +114,9 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       WHEELS_CI: "true"
-      PORT: "8080"
+      # Off the CLI's common fallback ports (8080/60000/3000/8500) so the
+      # fallback-port sentinel below can guard all four.
+      PORT: "8190"
     steps:
       - uses: actions/checkout@v5
 
@@ -139,6 +141,9 @@ jobs:
         # which the old inline parser let through as a pass (#3694).
         run: python3 tools/ci/test_testbox_results.py
 
+      - name: Test the fallback-port sentinel
+        run: python3 tools/ci/test_fallback_port_sentinel.py
+
       - name: Run CLI test suite
         env:
           WHEELS_CLI_TEST_RESULT_FILE: ${{ runner.temp }}/cli-test-results.json
@@ -146,6 +151,10 @@ jobs:
           # walker sees the whole result tree and reconciles counts (#3694)
           # and the routing specs no longer reach a live server (#3693).
           WHEELS_CLI_TEST_STRICT: "1"
+          # Fail the run if anything contacts a common fallback port: no spec
+          # may reach a server it did not start, and no command that changes
+          # state or carries the reload password may fall back at all.
+          WHEELS_CLI_FALLBACK_SENTINEL: "1"
         run: bash tools/test-cli-local.sh
 
       - name: Upload raw CLI test results

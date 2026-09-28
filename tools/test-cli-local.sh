@@ -17,6 +17,11 @@
 #   bash tools/test-cli-local.sh              # run all CLI specs
 #   PORT=9090 bash tools/test-cli-local.sh    # custom port
 #   LUCLI_BIN=/path/to/lucli bash tools/test-cli-local.sh   # pick the runtime
+#   WHEELS_CLI_FALLBACK_SENTINEL=1 PORT=8190 bash tools/test-cli-local.sh
+#       # guard the CLI's common fallback ports (8080, 60000, 3000, 8500) with
+#       # tools/ci/fallback_port_sentinel.py and fail the run if anything in
+#       # it contacts them. Run the suite's own server on a port outside that
+#       # list, or the sentinel cannot guard the port the server holds.
 #
 set -euo pipefail
 
@@ -94,6 +99,11 @@ listener_pid() {
 
 # ── Lifecycle ───────────────────────────────────────
 cleanup() {
+  if [ -n "${SENTINEL_PID:-}" ]; then
+    kill "$SENTINEL_PID" 2>/dev/null || true
+    wait "$SENTINEL_PID" 2>/dev/null || true
+    SENTINEL_PID=""
+  fi
   # Put lucee.json back first, on EVERY exit path — success, a red suite, or
   # Ctrl-C — so an overridden PORT never leaves the repo dirty. Guarded: the
   # restore helper is defined further down, and an early exit (e.g. the
@@ -276,6 +286,40 @@ echo "Warming up..."
 curl -s -o /dev/null --max-time 120 "http://localhost:${PORT}/?reload=true&password=${PASSWORD}" || true
 sleep 2
 
+# ── Fallback-port sentinel (opt-in; CI turns it on) ─
+#
+# No spec may reach a server it did not start, and no command that changes
+# state, runs code or carries the reload password may fall back to a common
+# port. The sentinel listens on those ports for the whole run and records
+# every contact; the run fails below if there were any.
+SENTINEL_PID=""
+SENTINEL_LOG=""
+if [ "${WHEELS_CLI_FALLBACK_SENTINEL:-0}" = "1" ]; then
+  SENTINEL_PORTS=""
+  for p in 8080 60000 3000 8500; do
+    if [ "$p" = "$PORT" ]; then
+      echo "::warning::The test server holds fallback port ${PORT}; the sentinel cannot guard it. Use PORT=8190." >&2
+      continue
+    fi
+    SENTINEL_PORTS="${SENTINEL_PORTS:+${SENTINEL_PORTS},}${p}"
+  done
+  SENTINEL_LOG="${RESULT_FILE%.json}.sentinel.log"
+  SENTINEL_READY="${RESULT_FILE%.json}.sentinel.ready"
+  rm -f "$SENTINEL_LOG" "$SENTINEL_READY"
+  python3 "$PROJECT_ROOT/tools/ci/fallback_port_sentinel.py" serve \
+    --log "$SENTINEL_LOG" --ports "$SENTINEL_PORTS" --ready-file "$SENTINEL_READY" &
+  SENTINEL_PID=$!
+  for _ in $(seq 1 50); do
+    [ -f "$SENTINEL_READY" ] && break
+    kill -0 "$SENTINEL_PID" 2>/dev/null || break
+    sleep 0.2
+  done
+  if [ ! -f "$SENTINEL_READY" ]; then
+    echo "::error::The fallback-port sentinel did not start (see the message above)." >&2
+    exit 1
+  fi
+fi
+
 # ── Run tests ───────────────────────────────────────
 TEST_URL="http://localhost:${PORT}/wheels/cli/tests?format=json"
 echo "Running CLI tests: ${TEST_URL}"
@@ -301,8 +345,27 @@ if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "417" ]; then
   if [ "${WHEELS_CLI_TEST_STRICT:-0}" = "1" ]; then
     STRICT_FLAG="--strict"
   fi
-  python3 "$PROJECT_ROOT/tools/ci/testbox_results.py" "$RESULT_FILE" $STRICT_FLAG
-  exit $?
+  SUITE_RC=0
+  python3 "$PROJECT_ROOT/tools/ci/testbox_results.py" "$RESULT_FILE" $STRICT_FLAG || SUITE_RC=$?
+  if [ -n "$SENTINEL_PID" ]; then
+    kill "$SENTINEL_PID" 2>/dev/null || true
+    wait "$SENTINEL_PID" 2>/dev/null || true
+    SENTINEL_PID=""
+    SENTINEL_RC=0
+    # This run = this script (and everything it spawned) plus the test
+    # server JVM, which may be re-parented. A contact attributed to any
+    # other process is listed as "not this run" and does not fail it.
+    RUN_PIDS=(--run-pid "$$")
+    SERVER_JVM_PID="$(listener_pid "$PORT" || true)"
+    if [ -n "$SERVER_JVM_PID" ]; then
+      RUN_PIDS+=(--run-pid "$SERVER_JVM_PID")
+    fi
+    python3 "$PROJECT_ROOT/tools/ci/fallback_port_sentinel.py" check --log "$SENTINEL_LOG" "${RUN_PIDS[@]}" || SENTINEL_RC=$?
+    if [ "$SENTINEL_RC" != "0" ] && [ "$SUITE_RC" = "0" ]; then
+      SUITE_RC=$SENTINEL_RC
+    fi
+  fi
+  exit $SUITE_RC
 else
   echo "Test runner returned HTTP ${HTTP_CODE}"
   cat "$RESULT_FILE" | head -30

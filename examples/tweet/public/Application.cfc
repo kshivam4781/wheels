@@ -201,6 +201,21 @@ component output="false" {
 			application.contentOnly = false;
 		}
 
+		// Reload password transport: the Wheels CLI sends it in the
+		// X-Wheels-Reload-Password request header so it stays out of URLs, access
+		// logs and proxy logs. Map it onto url.password so the reload gate below,
+		// the cold-start path and the soft-reload skip all see one value.
+		// ?reload=true&password=... from a browser keeps working unchanged, and
+		// an explicit url.password wins over the header.
+		if (
+			StructKeyExists(url, "reload")
+			&& !StructKeyExists(url, "password")
+			&& IsDefined("cgi.http_x_wheels_reload_password")
+			&& Len(ToString(cgi.http_x_wheels_reload_password))
+		) {
+			url.password = ToString(cgi.http_x_wheels_reload_password);
+		}
+
 		local.lockName = "reloadLock" & this.name;
 
 		// Abort if called from incorrect file.

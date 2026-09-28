@@ -108,6 +108,15 @@ component {
 	 * Returns port number or 0 if no server found.
 	 */
 	public numeric function detectServerPort() {
+		// These specs run inside the test server itself, so its own port is
+		// the answer: no probing, and never a fallback port that may belong to
+		// another app (the fallback-port sentinel fails the run on contact).
+		try {
+			if (isNumeric(cgi.server_port) && cgi.server_port > 0 && isPortResponding(val(cgi.server_port))) {
+				return val(cgi.server_port);
+			}
+		} catch (any e) {}
+
 		// Check environment variable (set by CI)
 		var envPort = createObject("java", "java.lang.System").getenv("PORT");
 		if (!isNull(envPort) && len(envPort) && isPortResponding(val(envPort))) {
