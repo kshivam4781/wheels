@@ -24,6 +24,10 @@ component extends="Base" {
 	 *
 	 */
 	public void function up() {
+		// The placeholder for a migration that never declares its own up().
+		// The migrator leaves only this inherited body untracked, detected by
+		// declaration (Migrator.$migrationStepIsPlaceholder, #3402 B1), so a
+		// migration's own up() that calls super.up() is still recorded.
 		announce("UP MIGRATION NOT IMPLEMENTED");
 	}
 
@@ -37,6 +41,7 @@ component extends="Base" {
 	 *
 	 */
 	public void function down() {
+		// See up(): only this inherited placeholder keeps its tracking row.
 		announce("DOWN MIGRATION NOT IMPLEMENTED");
 	}
 
