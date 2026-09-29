@@ -14,6 +14,7 @@ on:
     paths:
       - 'tools/distribution-drafts/linux-packages/**'
       - 'tools/test-linux-launcher-java.sh'
+      - 'tools/test-linux-launcher-docs-mirror.sh'
       - 'tools/test-linux-package-checksums.sh'
       - '.github/workflows/linux-launcher.yml'
   push:
@@ -21,6 +22,7 @@ on:
     paths:
       - 'tools/distribution-drafts/linux-packages/**'
       - 'tools/test-linux-launcher-java.sh'
+      - 'tools/test-linux-launcher-docs-mirror.sh'
       - 'tools/test-linux-package-checksums.sh'
       - '.github/workflows/linux-launcher.yml'
 
@@ -36,6 +38,9 @@ jobs:
 
       - name: Test the launcher's Java resolution (fake JDKs)
         run: bash tools/test-linux-launcher-java.sh
+
+      - name: Test the launcher's offline-docs mirror into public/wheels-docs
+        run: bash tools/test-linux-launcher-docs-mirror.sh
 
       - name: Test the package build's download checksum gate (local files)
         run: bash tools/test-linux-package-checksums.sh
