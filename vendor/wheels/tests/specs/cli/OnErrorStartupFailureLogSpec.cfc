@@ -1,6 +1,7 @@
 /**
  * Every copy of public/Application.cfc writes the failure behind the minimal
- * "Wheels failed to initialize" page to wheels.log before rendering it
+ * "Wheels failed to initialize" page to wheels.log before rendering it, and
+ * shows the root cause on the page only when showErrorInformation is on
  * (#3671). The page tells the operator to check the server log, so an entry
  * has to exist, and it has to name the root cause: Adobe CF wraps a failure
  * inside an application event in an event-handler exception whose message
@@ -47,6 +48,42 @@ component extends="wheels.WheelsTest" {
 							relPath & " $logStartupFailure() must wrap its body in try/catch so logging never masks the error."
 						);
 
+						// The page follows showErrorInformation: full detail only when it is
+						// true, nothing when any copy of it is false, the bare message
+						// only before startup set it (##3671).
+						// Logged in every environment: before, and outside, the decision about the page.
+						var decidePos = reFindNoCase("\$startupFailureShowDetail\s*\(\s*\)", render);
+						expect(logPos > 0 && logPos < decidePos).toBeTrue(
+							relPath & " $renderMinimalError() must log before deciding what the page shows, so production still logs."
+						);
+						expect(reFindNoCase("\$startupFailureFrames\s*\(", $functionBody(content, "\$logStartupFailure", relPath)) > 0).toBeTrue(
+							relPath & " $logStartupFailure() must log the whole tag context via $startupFailureFrames()."
+						);
+						expect(reFindNoCase("\$startupFailureShowDetail\s*\(\s*\)", render) > 0).toBeTrue(
+							relPath & " $renderMinimalError() must decide what to show via $startupFailureShowDetail()."
+						);
+						expect(reFindNoCase("showDetail\s*==\s*""yes""\s*\)\s*\{\s*WriteOutput\s*\(\s*\$startupFailureDetailHtml", render) > 0).toBeTrue(
+							relPath & " $renderMinimalError() must render $startupFailureDetailHtml() only when showDetail is ""yes""."
+						);
+						expect(reFindNoCase("showDetail\s*==\s*""unknown""", render) > 0).toBeTrue(
+							relPath & " $renderMinimalError() must show the bare message only while showErrorInformation is unknown."
+						);
+						var decide = $functionBody(content, "\$startupFailureShowDetail", relPath);
+						expect(reFindNoCase("showErrorInformation\)\s*\{\s*return\s+""no""", decide) > 0).toBeTrue(
+							relPath & " $startupFailureShowDetail() must answer ""no"" as soon as any showErrorInformation is false."
+						);
+						expect(findNoCase("""$wheels""", decide) > 0 && findNoCase("""wheels""", decide) > 0).toBeTrue(
+							relPath & " $startupFailureShowDetail() must read both application.$wheels and application.wheels."
+						);
+						expect(reFindNoCase("catch\s*\(\s*any\s+\w+\s*\)\s*\{\s*return\s+""unknown""", decide) > 0).toBeTrue(
+							relPath & " $startupFailureShowDetail() must answer ""unknown"" when the application scope can't be read (##3379)."
+						);
+						var detailHtml = $functionBody(content, "\$startupFailureDetailHtml", relPath);
+						var rawConcats = reMatchNoCase("html\s*&=\s*""[^""]*""\s*&\s*(?!encodeForHTML)[a-z\$]", detailHtml);
+						expect(arrayLen(rawConcats)).toBe(0,
+							relPath & " $startupFailureDetailHtml() must HTML-encode every value it writes: " & arrayToList(rawConcats, " | ")
+						);
+
 						var cause = $functionBody(content, "\$startupFailureCause", relPath);
 						expect(findNoCase("RootCause", cause) > 0).toBeTrue(
 							relPath & " $startupFailureCause() must walk RootCause so Adobe's event-handler wrapper does not hide the cause."
@@ -54,6 +91,32 @@ component extends="wheels.WheelsTest" {
 					});
 				})(rel);
 			}
+
+		});
+
+		describe("showErrorInformation is never briefly true in production (##3671)", () => {
+
+			var source = fileRead(expandPath("/wheels/events/init/debugging.cfm"));
+
+			it("derives it from the environment in its only assignment", () => {
+				var assignments = reMatchNoCase("showErrorInformation\s*=[^;]*;", source);
+				expect(arrayLen(assignments)).toBe(1, "debugging.cfm must assign showErrorInformation exactly once: " & arrayToList(assignments, " | "));
+				expect(reFindNoCase("showErrorInformation\s*=\s*application\.\$wheels\.environment\s*!=\s*""production""", assignments[1]) > 0).toBeTrue(
+					"showErrorInformation must be set from the environment, not true-then-overridden: " & assignments[1]
+				);
+			});
+
+			it("sets it before anything that can throw on the request (the Host-derived error address)", () => {
+				var assignPos = reFindNoCase("showErrorInformation\s*=", source);
+				var hostPos = findNoCase("request.cgi.server_name", source);
+				expect(assignPos > 0 && assignPos < hostPos).toBeTrue();
+			});
+
+			it("derives the error address only from a host with at least two labels", () => {
+				expect(reFindNoCase("ListLen\(\s*request\.cgi\.server_name\s*,\s*""\.""\s*\)\s*>=\s*2", source) > 0).toBeTrue(
+					"A Host such as ""example."" has a dot but one label; ListGetAt(..., 2, ""."") would throw."
+				);
+			});
 
 		});
 
