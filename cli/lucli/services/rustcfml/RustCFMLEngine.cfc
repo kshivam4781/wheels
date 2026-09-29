@@ -217,20 +217,60 @@ component {
 	 * Mirrors tools/rustcfml/run-suite.sh.
 	 */
 	public string function assetName() {
-		var os = createObject("java", "java.lang.System").getProperty("os.name");
-		var arch = createObject("java", "java.lang.System").getProperty("os.arch");
-		var isMac = findNoCase("mac", os) > 0;
-		var isLinux = findNoCase("linux", os) > 0;
-		var isArm = findNoCase("aarch64", arch) > 0 || findNoCase("arm64", arch) > 0;
-		var isX64 = findNoCase("amd64", arch) > 0 || findNoCase("x86_64", arch) > 0;
+		var system = createObject("java", "java.lang.System");
+		var osName = system.getProperty("os.name");
+		var osArch = system.getProperty("os.arch");
+		// An x86_64 JVM on a Mac may be an Intel JDK under Rosetta on Apple
+		// Silicon: ask the hardware, since the native binary runs there.
+		var arm64Hardware = findNoCase("mac", osName) && !findNoCase("aarch64", osArch) && !findNoCase("arm64", osArch)
+			? $macHasArm64Hardware()
+			: false;
+		return $assetFor(osName, osArch, arm64Hardware);
+	}
 
-		if (isMac && isArm) return "rustcfml-macos-aarch64";
-		if (isMac && isX64) return "rustcfml-macos-x86_64";
+	/** Whether this Mac's CPU is Apple Silicon (`sysctl hw.optional.arm64` is 1), whatever the JVM's arch. */
+	public boolean function $macHasArm64Hardware() {
+		try {
+			var proc = createObject("java", "java.lang.ProcessBuilder").init(["/usr/sbin/sysctl", "-n", "hw.optional.arm64"])
+				.redirectErrorStream(true).start();
+			var answer = createObject("java", "java.io.BufferedReader")
+				.init(createObject("java", "java.io.InputStreamReader").init(proc.getInputStream())).readLine();
+			proc.waitFor();
+			return !isNull(answer) && trim(answer) == "1";
+		} catch (any e) {
+			return false;
+		}
+	}
+
+	/**
+	 * The RustCFML release asset for `osName` / `osArch` (Java's os.name and
+	 * os.arch), or Wheels.RustCFML.UnsupportedPlatform when RustCFML publishes
+	 * no build for it. RustCFML releases ship Linux x86_64 and aarch64 and
+	 * macOS aarch64 (Apple Silicon); there is no macOS x86_64 (Intel) build,
+	 * which used to surface as a 404 from the download instead of this error.
+	 * `arm64Hardware` marks an x86_64 JVM on Apple Silicon (Rosetta), which
+	 * gets the native arm64 build.
+	 */
+	public string function $assetFor(required string osName, required string osArch, boolean arm64Hardware = false) {
+		var isMac = findNoCase("mac", arguments.osName) > 0;
+		var isLinux = findNoCase("linux", arguments.osName) > 0;
+		var isArm = findNoCase("aarch64", arguments.osArch) > 0 || findNoCase("arm64", arguments.osArch) > 0;
+		var isX64 = findNoCase("amd64", arguments.osArch) > 0 || findNoCase("x86_64", arguments.osArch) > 0;
+
+		if (isMac && (isArm || arguments.arm64Hardware)) return "rustcfml-macos-aarch64";
 		if (isLinux && isArm) return "rustcfml-linux-aarch64";
 		if (isLinux && isX64) return "rustcfml-linux-x86_64";
+		if (isMac && isX64) {
+			throw(
+				type = "Wheels.RustCFML.UnsupportedPlatform",
+				message = "RustCFML publishes no macOS Intel (x86_64) build, so the RustCFML engine can't run on this Mac.",
+				detail = "Use the default engine (wheels start), or run RustCFML on Apple Silicon or Linux."
+			);
+		}
 		throw(
 			type = "Wheels.RustCFML.UnsupportedPlatform",
-			message = "No RustCFML binary for " & os & " / " & arch
+			message = "RustCFML publishes no build for #arguments.osName# / #arguments.osArch#.",
+			detail = "RustCFML builds exist for Linux (x86_64, aarch64) and macOS on Apple Silicon. Use the default engine (wheels start)."
 		);
 	}
 
