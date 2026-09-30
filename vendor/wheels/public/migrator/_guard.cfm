@@ -4,8 +4,10 @@
  * migrator command and template-create endpoints are dispatched via the
  * public component, outside the middleware pipeline and the controller CSRF
  * layer, and degrade to GET when URL rewriting is off. Both must enforce:
- * localhost only, no non-loopback forwarded clients, and a custom anti-CSRF
- * request header so a page the developer merely visits cannot auto-submit.
+ * localhost only, no non-loopback forwarded clients, a local Host header, and a
+ * custom anti-CSRF request header so a page the developer merely visits cannot
+ * auto-submit. The GUI views that issue the CSRF token share the network-origin
+ * gates via $migratorEnforceLocalAccess() (everything except the token check).
  * Each helper is defined once (StructKeyExists guard) so re-including is safe.
  */
 if (!StructKeyExists(variables, "$migratorEnforceLocalhost")) {
@@ -87,10 +89,99 @@ if (!StructKeyExists(variables, "$migratorVerifyCsrfToken")) {
 	};
 }
 
-if (!StructKeyExists(variables, "$migratorApplyDevToolGuards")) {
-	variables.$migratorApplyDevToolGuards = function() {
+if (!StructKeyExists(variables, "$migratorHostIsLocal")) {
+	variables.$migratorHostIsLocal = function(required string hostHeader) {
+		// Returns whether a Host-header value names the local machine. Uses plain
+		// string checks — no DNS lookup — so the decision is about the NAME the
+		// request was addressed to, not where that name happens to resolve.
+		local.host = Trim(arguments.hostHeader);
+		if (!Len(local.host)) {
+			return false;
+		}
+		// Strip the optional port, handling a bracketed IPv6 literal first.
+		if (Left(local.host, 1) == "[") {
+			local.close = Find("]", local.host);
+			if (local.close <= 2) {
+				return false;
+			}
+			// Only an optional :port may follow the closing bracket — reject
+			// anything else so "[::1]evil" cannot slip through.
+			local.after = Mid(local.host, local.close + 1, Len(local.host));
+			if (Len(local.after) && ReFind("^:[0-9]+$", local.after) == 0) {
+				return false;
+			}
+			local.host = Mid(local.host, 2, local.close - 2);
+		} else if (Find(":", local.host)) {
+			local.host = ListFirst(local.host, ":");
+		}
+		local.host = LCase(Trim(local.host));
+		// Built-in local names / IPv6 loopback literals.
+		if (ListFindNoCase("localhost,::1,0:0:0:0:0:0:0:1", local.host)) {
+			return true;
+		}
+		// RFC 6761: the .localhost TLD (and any name under it) is reserved for
+		// loopback, so a developer's *.localhost dev host works without config.
+		if (Right(local.host, 10) == ".localhost") {
+			return true;
+		}
+		// Any address in the 127.0.0.0/8 loopback block: exactly four octets, the
+		// first is 127, and each octet is 0-255.
+		local.octets = ListToArray(local.host, ".");
+		if (ArrayLen(local.octets) == 4 && local.octets[1] == "127") {
+			local.octetsValid = true;
+			for (local.octet in local.octets) {
+				if (ReFind("^[0-9]{1,3}$", local.octet) == 0 || Val(local.octet) > 255) {
+					local.octetsValid = false;
+					break;
+				}
+			}
+			if (local.octetsValid) {
+				return true;
+			}
+		}
+		// Extra host names the developer allowed via set(migratorAllowedHosts="...").
+		local.extra = "";
+		if (StructKeyExists(application, "wheels") && StructKeyExists(application.wheels, "migratorAllowedHosts")) {
+			local.extra = application.wheels.migratorAllowedHosts;
+		}
+		if (Len(local.extra) && ListFindNoCase(local.extra, local.host)) {
+			return true;
+		}
+		return false;
+	};
+}
+
+if (!StructKeyExists(variables, "$migratorEnforceLocalHostname")) {
+	variables.$migratorEnforceLocalHostname = function() {
+		// ── Security: request must be addressed to a local host name ──
+		// cgi.HTTP_HOST is the Host header the browser sent. Requiring it to be a
+		// local name means the dev tools only answer requests addressed to the
+		// local machine, even though the socket itself is already loopback.
+		local.hostHeader = StructKeyExists(cgi, "HTTP_HOST") ? cgi.HTTP_HOST : "";
+		if (!$migratorHostIsLocal(hostHeader = local.hostHeader)) {
+			cfheader(statuscode=403);
+			cfcontent(type="text/plain", reset=true);
+			writeOutput("Migrator dev tools only accept requests addressed to a local host name (localhost, *.localhost, 127.0.0.1, or [::1]). For a custom local hostname like myapp.test, add it with set(migratorAllowedHosts=""myapp.test"").");
+			abort;
+		}
+	};
+}
+
+if (!StructKeyExists(variables, "$migratorEnforceLocalAccess")) {
+	variables.$migratorEnforceLocalAccess = function() {
+		// The network-origin gates shared by the dev-tool endpoints and by the
+		// token-issuing GUI views: localhost socket, no non-loopback forwarded
+		// clients, and a local Host header. Deliberately excludes the CSRF-token
+		// check, which the GUI views cannot satisfy — they issue the token.
 		$migratorEnforceLocalhost();
 		$migratorEnforceNoForwardedClients();
+		$migratorEnforceLocalHostname();
+	};
+}
+
+if (!StructKeyExists(variables, "$migratorApplyDevToolGuards")) {
+	variables.$migratorApplyDevToolGuards = function() {
+		$migratorEnforceLocalAccess();
 		$migratorVerifyCsrfToken();
 	};
 }
