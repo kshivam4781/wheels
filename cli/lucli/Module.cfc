@@ -5745,6 +5745,24 @@ component extends="modules.BaseModule" {
 		return "";
 	}
 
+	/**
+	 * "Next steps" guidance for the final start-or-reload line printed after
+	 * `generate scaffold` / `generate api-resource`. Both commands write new
+	 * routes (config/routes.cfm) and usually a migration; when this project's
+	 * own dev server is already running, "Start server: wheels start" is
+	 * wrong advice (the existing server keeps serving the pre-generation
+	 * routes/migration state), and following it 404s GET /<resource> and
+	 * 500s GET /<resource>/new with Wheels.IncorrectArguments until a manual
+	 * `wheels reload` — see #3883. Reload picks up both the new routes and
+	 * the migration once it has been run, so the CLI should name it whenever
+	 * a server for this project is already live.
+	 */
+	private string function $scaffoldNextStepsServerLine() {
+		return $verifyOwnServer().port > 0
+			? "Reload to pick up the new routes: wheels reload"
+			: "Start server: wheels start";
+	}
+
 	private string function generateScaffold(required array args) {
 		if (!arrayLen(args)) {
 			out("Usage: wheels generate scaffold <Name> [properties...] [--force]", "yellow");
@@ -5815,7 +5833,7 @@ component extends="modules.BaseModule" {
 				out("");
 				out("Scaffold complete! Next steps:", "green");
 				out("  1. Run migrations: wheels migrate latest");
-				out("  2. Start server: wheels start");
+				out("  2. #$scaffoldNextStepsServerLine()#");
 			}
 		} else {
 			$refuse("Scaffold failed: " & arrayToList(results.errors, "; "), "Wheels.Generate.Refused");
@@ -5992,7 +6010,7 @@ component extends="modules.BaseModule" {
 			out("");
 			out("API resource complete! Next steps:", "green");
 			out("  1. Run migrations: wheels migrate latest");
-			out("  2. Start server: wheels start");
+			out("  2. #$scaffoldNextStepsServerLine()#");
 			out("  3. Test: curl http://localhost:8080/api/#lCase(controllerName)#.json");
 		} else {
 			$refuse("API resource generation failed: " & arrayToList(results.errors, "; "), "Wheels.Generate.Refused");
