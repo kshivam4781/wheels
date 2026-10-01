@@ -1,0 +1,1 @@
+- `wheels generate scaffold` and `wheels generate api-resource` now tell you to run `wheels reload`, not `wheels start`, in their "Next steps" output when this project's own dev server is already running — the old advice left newly generated routes and migrations un-picked-up until a manual reload (#3883)
