@@ -17,12 +17,13 @@ component extends="wheels.wheelstest.system.BaseSpec" {
 
 	function run() {
 
-		describe("S2 PROVE — generate controller ../X never hits validateName", () => {
+		describe("S2 — generate controller names are validated where the file is built", () => {
 
-			it("Module.generateController does not call validateName before CodeGen", () => {
+			it("Module.generateController delegates to CodeGen, which checks the name first", () => {
 				var body = $sliceFn(moduleSrc, "(?m)^[ \t]*private\s+string\s+function\s+generateController\s*\(", 1200);
-				expect(findNoCase("validateName", body)).toBe(0);
 				expect(body).toInclude("codegen.generateController");
+				var codegenSrc = fileRead(expandPath("/cli/lucli/services/CodeGen.cfc"));
+				expect(codegenSrc).toInclude('GeneratorPaths().componentName(arguments.name, "controller")');
 			});
 
 		});

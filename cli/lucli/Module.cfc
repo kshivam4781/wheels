@@ -565,7 +565,7 @@ component extends="modules.BaseModule" {
 			.positional(name = "target", default = "", description = "search: the query. show/remove: the package name. add: name or name@version. update: the package name (omit with --all). registry: refresh or info")
 			.option(name = "tag", default = "", description = "list only: show only packages carrying this tag (pass as --tag=<tag>)")
 			.flag(name = "all", default = false, description = "update only: update every installed package")
-			.flag(name = "yes", default = false, description = "update only: confirm the update (required)")
+			.flag(name = "yes", default = false, description = "update and remove: confirm the change (required)")
 			.flag(name = "force", default = false, description = "add only: overwrite vendor/<name>/ if it already exists")
 			.flag(name = "offline", default = false, description = "Refuse registry network access (cached registry data still works). Also set by WHEELS_OFFLINE=1")
 			// `help` is honoured from in-process callers but never advertised:
@@ -792,13 +792,14 @@ component extends="modules.BaseModule" {
 	 * would-be path and skips the write.
 	 */
 	private string function $generateWrite(required string path, required string content) {
+		new services.GeneratorPaths().assertInside(variables.projectRoot, arguments.path);
 		if (request.$wheelsGenerateDryRun ?: false) {
 			arrayAppend(request.$wheelsDryRunPaths, arguments.path);
 			return arguments.path;
 		}
 		var dir = getDirectoryFromPath(arguments.path);
 		if (!directoryExists(dir)) {
-			directoryCreate(dir, true);
+			$ensureProjectDirectory(dir);
 		}
 		FileWrite(arguments.path, arguments.content);
 		return arguments.path;
@@ -2436,6 +2437,9 @@ component extends="modules.BaseModule" {
 			out("RustCFML server stopped.", "cyan");
 			return "";
 		}
+		if ((rustStatus.staleReason ?: "") == "pid-not-server") {
+			out(rustStatus.message, "yellow");
+		}
 
 		out("Stopping Wheels server...", "cyan");
 
@@ -2548,14 +2552,21 @@ component extends="modules.BaseModule" {
 				out("Log: " & st.log, "cyan");
 				break;
 			case "stop":
+				var before = svc.status(variables.projectRoot);
+				if ((before.staleReason ?: "") == "pid-not-server") {
+					out(before.message, "yellow");
+					break;
+				}
 				out(svc.stop(variables.projectRoot)
 					? "RustCFML server stopped."
-					: "No RustCFML server recorded for this project.", "cyan");
+					: "No RustCFML server running for this project.", "cyan");
 				break;
 			case "status":
 				var status = svc.status(variables.projectRoot);
 				if (status.running) {
 					out("RustCFML running (pid " & status.pid & ") at http://127.0.0.1:" & status.port, "green");
+				} else if ((status.staleReason ?: "") == "pid-not-server") {
+					out(status.message, "yellow");
 				} else {
 					out("No RustCFML server running for this project.", "yellow");
 				}
@@ -2636,6 +2647,16 @@ component extends="modules.BaseModule" {
 		}
 
 		var appName = opts.appName;
+		// The app name becomes a directory and is written into config/app.cfm
+		// (this.name) and the datasource name: letters, digits, underscores and
+		// hyphens only, starting with a letter.
+		var appNames = new services.GeneratorPaths();
+		if (!appNames.isToken(appName) || !reFind("[A-Za-z]", left(appName, 1))) {
+			throw(
+				type = "Wheels.Generate.InvalidName",
+				message = "Invalid app name '#appName#': use letters, digits, underscores and hyphens, starting with a letter."
+			);
+		}
 		var options = {
 			port: opts.port,
 			datasource: opts.datasource,
@@ -4271,6 +4292,9 @@ component extends="modules.BaseModule" {
 	 *   wheels deploy version                  - show version pinning
 	 */
 	public string function deploy() {
+		// Each command starts with an empty secret/warning registry, so a
+		// long-lived process never carries one command's secrets into the next.
+		new modules.wheels.services.deploy.lib.SecretRedaction().reset();
 		var args = new services.ArgSpec().toArgv(structuredArgs(arguments));
 		var opts = $deployArgsToOptions(args);
 		if (!structKeyExists(opts, "configPath") || !len(opts.configPath)) {
@@ -5655,7 +5679,7 @@ component extends="modules.BaseModule" {
 
 		// Create view files for non-mutation actions
 		var viewDir = variables.projectRoot & "/app/views/#lCase(controllerName)#";
-		ensureDirectory(viewDir);
+		$ensureProjectDirectory(viewDir);
 
 		for (var action in actions) {
 			if (!listFindNoCase("create,update,delete,destroy", action)) {
@@ -5700,13 +5724,13 @@ component extends="modules.BaseModule" {
 			$refuse("wheels generate migration: missing required arguments. Usage: wheels generate migration <Name>");
 		}
 
-		var migrationName = args[1];
+		var migrationName = new services.GeneratorPaths().identifier($underscoreHyphens(args[1], "migration"), "migration");
 		var timestamp = getService("helpers").generateMigrationTimestamp();
 		var fileName = "#timestamp#_#migrationName#.cfc";
 		var migrationDir = variables.projectRoot & "/app/migrator/migrations";
 		var filePath = migrationDir & "/#fileName#";
 
-		ensureDirectory(migrationDir);
+		$ensureProjectDirectory(migrationDir);
 
 		// Always build the migration inline. The shipped codegen template
 		// dbmigrate/blank.txt carries |DBMigrateExtends|/|DBMigrateDescription|
@@ -5807,7 +5831,7 @@ component extends="modules.BaseModule" {
 			$refuse("wheels generate route: missing required arguments. Usage: wheels generate route <name>");
 		}
 
-		var routeName = lCase(args[1]);
+		var routeName = lCase(new services.GeneratorPaths().token(args[1], "route"));
 		var routesPath = variables.projectRoot & "/config/routes.cfm";
 
 		if (!fileExists(routesPath)) {
@@ -5881,11 +5905,12 @@ component extends="modules.BaseModule" {
 			$refuse("wheels generate property: missing required arguments. Usage: wheels generate property <ModelName> <property:type>");
 		}
 
-		var modelName = capitalize(args[1]);
+		var names = new services.GeneratorPaths();
+		var modelName = capitalize(names.identifier(args[1], "model"));
 		var propArg = args[2];
 		var parts = listToArray(propArg, ":");
-		var propName = parts[1];
-		var propType = arrayLen(parts) > 1 ? parts[2] : "string";
+		var propName = names.identifier($underscoreHyphens(arrayLen(parts) ? parts[1] : "", "property"), "property");
+		var propType = names.identifier(arrayLen(parts) > 1 ? parts[2] : "string", "property type");
 
 		var tableName = getService("helpers").pluralize(lCase(modelName));
 		var timestamp = getService("helpers").generateMigrationTimestamp();
@@ -5893,7 +5918,7 @@ component extends="modules.BaseModule" {
 		var fileName = "#timestamp#_#migrationName#.cfc";
 		var migrationDir = variables.projectRoot & "/app/migrator/migrations";
 
-		ensureDirectory(migrationDir);
+		$ensureProjectDirectory(migrationDir);
 
 		var colType = mapPropertyType(propType);
 		var nl = chr(10);
@@ -6136,7 +6161,8 @@ component extends="modules.BaseModule" {
 			$refuse("wheels generate admin: missing required arguments. Usage: wheels generate admin <modelName> [--force] [--no-routes]");
 		}
 
-		var modelName = capitalize(arguments.args[1]);
+		// Checked before introspection: the name goes into the introspection URL too.
+		var modelName = capitalize(new services.GeneratorPaths().identifier(arguments.args[1], "model"));
 		var force = false;
 		var noRoutes = false;
 		for (var i = 2; i <= arrayLen(arguments.args); i++) {
@@ -6454,10 +6480,7 @@ component extends="modules.BaseModule" {
 		if (fileExists(fullPath) && !arguments.force) {
 			return "";
 		}
-		var dir = getDirectoryFromPath(fullPath);
-		if (!directoryExists(dir)) {
-			directoryCreate(dir, true);
-		}
+		// $generateWrite checks the path and creates its directory inside the project.
 		$generateWrite(fullPath, arguments.content);
 		return arguments.relativePath;
 	}
@@ -6475,7 +6498,7 @@ component extends="modules.BaseModule" {
 			return "";
 		}
 
-		ensureDirectory(snippetsDir);
+		$ensureProjectDirectory(snippetsDir);
 
 		var copied = 0;
 		var skipped = 0;
@@ -6495,7 +6518,7 @@ component extends="modules.BaseModule" {
 				continue;
 			}
 
-			fileCopy(sourcePath, destPath);
+			fileCopy(sourcePath, new services.GeneratorPaths().assertInside(variables.projectRoot, destPath));
 			printCreated("app/snippets/#entry#");
 			copied++;
 		}
@@ -6521,7 +6544,7 @@ component extends="modules.BaseModule" {
 	 * Recursively copy a snippet template subdirectory
 	 */
 	private void function copySnippetDir(required string source, required string dest, boolean force = false) {
-		ensureDirectory(arguments.dest);
+		$ensureProjectDirectory(arguments.dest);
 		var entries = directoryList(arguments.source, false, "name");
 		for (var entry in entries) {
 			var sourcePath = arguments.source & "/" & entry;
@@ -6530,7 +6553,7 @@ component extends="modules.BaseModule" {
 				copySnippetDir(sourcePath, destPath, arguments.force);
 			} else {
 				if (!fileExists(destPath) || arguments.force) {
-					fileCopy(sourcePath, destPath);
+					fileCopy(sourcePath, new services.GeneratorPaths().assertInside(variables.projectRoot, destPath));
 					var relPath = replace(destPath, variables.projectRoot & "/", "");
 					printCreated(relPath);
 				}
@@ -10325,13 +10348,13 @@ component extends="modules.BaseModule" {
 		for (var arg in args) {
 			// Named association flags
 			if (reFindNoCase("^--belongsTo=", arg)) {
-				var rels = listToArray(valueAfterEquals(arg));
+				var rels = $validAssociationNames(listToArray(valueAfterEquals(arg)), "belongsTo");
 				result.belongsTo.append(rels, true);
 			} else if (reFindNoCase("^--hasMany=", arg)) {
-				var rels = listToArray(valueAfterEquals(arg));
+				var rels = $validAssociationNames(listToArray(valueAfterEquals(arg)), "hasMany");
 				result.hasMany.append(rels, true);
 			} else if (reFindNoCase("^--hasOne=", arg)) {
-				var rels = listToArray(valueAfterEquals(arg));
+				var rels = $validAssociationNames(listToArray(valueAfterEquals(arg)), "hasOne");
 				result.hasOne.append(rels, true);
 			} else if (arg.startsWith("--")) {
 				var flagName = listFirst(arg, "=");
@@ -10399,15 +10422,34 @@ component extends="modules.BaseModule" {
 	 * Brace modifiers attach to the type token only, so they never steal
 	 * the value list from `name:enum:a,b`.
 	 */
+	/**
+	 * A hyphen can't appear in a CFC or property name, and people do type
+	 * `create-users-table` or `display-name`, so hyphens in those names become
+	 * underscores (with a note) before the name is validated.
+	 */
+	private string function $underscoreHyphens(required string name, required string kind) {
+		if (!find("-", arguments.name)) {
+			return arguments.name;
+		}
+		var normalized = replace(arguments.name, "-", "_", "all");
+		out("  note    #arguments.kind# name '#arguments.name#' uses '#normalized#' (hyphens become underscores)", "yellow");
+		return normalized;
+	}
+
 	private struct function $parsePropertyArg(required string arg) {
 		// Split on the FIRST two colons only — any additional colons
 		// (e.g. inside the comma-separated value list) belong in the
 		// values segment.
 		var parts = listToArray(arguments.arg, ":");
+		var names = new services.GeneratorPaths();
+		// Property names and types are written into generated CFML (models,
+		// migrations, forms), so only plain identifiers are accepted.
+		var propName = names.identifier($underscoreHyphens(arrayLen(parts) ? parts[1] : "", "property"), "property");
 		var typeToken = arrayLen(parts) > 1 ? parts[2] : "string";
 		var modifiers = $parseTypeModifiers(typeToken);
+		names.identifier(modifiers.type, "property type");
 		var prop = {
-			name: parts[1],
+			name: propName,
 			type: modifiers.type
 		};
 		if (structKeyExists(modifiers, "limit")) {
@@ -10429,9 +10471,32 @@ component extends="modules.BaseModule" {
 			for (var i = 3; i <= arrayLen(parts); i++) {
 				arrayAppend(valueSegments, parts[i]);
 			}
-			prop.values = arrayToList(valueSegments, ":");
+			// Validate and emit the same (trimmed) values.
+			var enumValues = [];
+			for (var enumValue in listToArray(arrayToList(valueSegments, ":"))) {
+				enumValue = trim(enumValue);
+				if (!names.isToken(enumValue)) {
+					throw(
+						type = "Wheels.Generate.InvalidName",
+						message = "Invalid enum value '#enumValue#' for property '#prop.name#': use letters, digits, underscores and hyphens."
+					);
+				}
+				arrayAppend(enumValues, enumValue);
+			}
+			prop.values = arrayToList(enumValues);
 		}
 		return prop;
+	}
+
+	/** Association names from --belongsTo / --hasMany / --hasOne: plain identifiers only. */
+	private array function $validAssociationNames(required array names, required string flag) {
+		var paths = new services.GeneratorPaths();
+		// Validate and return the same (trimmed) names.
+		var valid = [];
+		for (var assoc in arguments.names) {
+			arrayAppend(valid, paths.identifier(trim(assoc), arguments.flag & " association"));
+		}
+		return valid;
 	}
 
 	/**
@@ -10772,6 +10837,11 @@ component extends="modules.BaseModule" {
 		var rustSvc = new services.rustcfml.RustCFMLEngine();
 		var rustStatus = rustSvc.status(variables.projectRoot);
 		var rustVerdict = {port: 0, reason: "not-registered", pid: "", hosts: []};
+		// status() already refuses a recorded pid that is alive but not this
+		// project's server; keep that reason so the caller can say so.
+		if ((rustStatus.staleReason ?: "") == "pid-not-server") {
+			rustVerdict.reason = "pid-not-server";
+		}
 		if (
 			rustStatus.running
 			&& structKeyExists(rustStatus, "port") && isNumeric(rustStatus.port) && rustStatus.port > 0
@@ -11680,6 +11750,11 @@ component extends="modules.BaseModule" {
 	/**
 	 * Ensure a directory exists, creating it if necessary
 	 */
+	/** ensureDirectory() for generator output: refuses a directory that resolves outside the project. */
+	private void function $ensureProjectDirectory(required string path) {
+		new services.GeneratorPaths().ensureDirectoryInside(variables.projectRoot, arguments.path);
+	}
+
 	private void function ensureDirectory(required string path) {
 		if (!directoryExists(path)) {
 			directoryCreate(path, true);

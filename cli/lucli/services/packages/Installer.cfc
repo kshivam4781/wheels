@@ -67,31 +67,29 @@ component {
 		}
 
 		local.vendorDir = variables.projectRoot & "vendor/";
-		local.target = local.vendorDir & arguments.name;
+		// Validates the name and pins the target to a direct child of vendor/
+		// before anything below deletes, downloads or extracts.
+		local.target = new modules.wheels.services.packages.PackageName().childOf(local.vendorDir, arguments.name);
 
-		if (DirectoryExists(local.target)) {
-			if (!arguments.force) {
-				Throw(
-					type = "Wheels.Packages.AlreadyInstalled",
-					message = "Package '#arguments.name#' is already installed at #local.target#. "
-						& "Use --force to overwrite."
-				);
-			}
-			DirectoryDelete(local.target, true);
+		if (DirectoryExists(local.target) && !arguments.force) {
+			Throw(
+				type = "Wheels.Packages.AlreadyInstalled",
+				message = "Package '#arguments.name#' is already installed at #local.target#. "
+					& "Use --force to overwrite."
+			);
 		}
 
-		if (!DirectoryExists(local.vendorDir)) {
-			DirectoryCreate(local.vendorDir, true);
-		}
-
-		// Download to a temp file. Normalize the separator: engines differ on
-		// whether GetTempDirectory() carries a trailing slash (RustCFML does
-		// not), and a bare concatenation would target the filesystem root.
+		// Download to a temp file and extract into a private staging directory.
+		// Normalize the separator: engines differ on whether GetTempDirectory()
+		// carries a trailing slash (RustCFML does not), and a bare concatenation
+		// would target the filesystem root.
 		local.tmpDir = GetTempDirectory();
 		if (Right(local.tmpDir, 1) != "/" && Right(local.tmpDir, 1) != "\") {
 			local.tmpDir &= "/";
 		}
-		local.tmpFile = local.tmpDir & "wheels-pkg-" & CreateUUID() & ".tar.gz";
+		local.token = CreateUUID();
+		local.tmpFile = local.tmpDir & "wheels-pkg-" & local.token & ".tar.gz";
+		local.stageDir = local.tmpDir & "wheels-pkg-stage-" & local.token & "/";
 		try {
 			variables.http.download(arguments.version.tarball, local.tmpFile);
 
@@ -107,19 +105,29 @@ component {
 				);
 			}
 
-			// Extract.
-			$extract(local.tmpFile, local.vendorDir);
+			// Extract into staging and check the layout before vendor/ is touched:
+			// only a single <name>/ tree (with package.json, no links) is moved in.
+			// Extraction itself stays inside stageDir because GNU tar and bsdtar
+			// refuse absolute and ".." member names by default; the layout check
+			// below then governs what may leave staging.
+			DirectoryCreate(local.stageDir, true);
+			$extract(local.tmpFile, local.stageDir);
+			new modules.wheels.services.packages.PackageLayout().assertSingleTree(local.stageDir, arguments.name);
 
-			if (!DirectoryExists(local.target)) {
-				Throw(
-					type = "Wheels.Packages.ExtractionFailed",
-					message = "Extraction completed but vendor/#arguments.name#/ was not produced. "
-						& "The tarball layout does not match the expected '<name>/...' convention."
-				);
+			if (!DirectoryExists(local.vendorDir)) {
+				DirectoryCreate(local.vendorDir, true);
 			}
+			// The previous install is replaced only once the new one is verified.
+			if (DirectoryExists(local.target)) {
+				DirectoryDelete(local.target, true);
+			}
+			$moveInto(local.stageDir & arguments.name, local.target);
 		} finally {
 			if (FileExists(local.tmpFile)) {
 				FileDelete(local.tmpFile);
+			}
+			if (DirectoryExists(local.stageDir)) {
+				DirectoryDelete(local.stageDir, true);
 			}
 		}
 
@@ -131,7 +139,7 @@ component {
 	 * Throws if the dir doesn't exist or doesn't look like a Wheels package.
 	 */
 	public void function uninstall(required string name) {
-		local.target = variables.projectRoot & "vendor/" & arguments.name;
+		local.target = new modules.wheels.services.packages.PackageName().childOf(variables.projectRoot & "vendor/", arguments.name);
 		if (!DirectoryExists(local.target)) {
 			Throw(
 				type = "Wheels.Packages.NotInstalled",
@@ -149,11 +157,11 @@ component {
 	}
 
 	public boolean function isInstalled(required string name) {
-		return DirectoryExists(variables.projectRoot & "vendor/" & arguments.name);
+		return DirectoryExists(new modules.wheels.services.packages.PackageName().childOf(variables.projectRoot & "vendor/", arguments.name));
 	}
 
 	public string function installedVersion(required string name) {
-		local.pkgJson = variables.projectRoot & "vendor/" & arguments.name & "/package.json";
+		local.pkgJson = new modules.wheels.services.packages.PackageName().childOf(variables.projectRoot & "vendor/", arguments.name) & "/package.json";
 		if (!FileExists(local.pkgJson)) return "";
 		try {
 			local.parsed = DeserializeJSON(FileRead(local.pkgJson));
@@ -164,6 +172,16 @@ component {
 	}
 
 	// ── Private ─────────────────────────────────────────────
+
+	/** Moves a staged tree into place; falls back to copy+delete across volumes. */
+	private void function $moveInto(required string src, required string dest) {
+		try {
+			DirectoryRename(arguments.src, arguments.dest);
+		} catch (any e) {
+			DirectoryCopy(arguments.src, arguments.dest, true);
+			DirectoryDelete(arguments.src, true);
+		}
+	}
 
 	private string function $sha256File(required string path) {
 		local.bin = FileReadBinary(arguments.path);

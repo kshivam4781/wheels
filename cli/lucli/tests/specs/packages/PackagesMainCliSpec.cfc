@@ -192,7 +192,7 @@ component extends="wheels.wheelstest.system.BaseSpec" {
 				DirectoryCreate(proj & "vendor/scary", true);
 				var threw = false;
 				try {
-					stack.cli.remove({target: "scary"});
+					stack.cli.remove({target: "scary", yes: true});
 				} catch (any e) {
 					threw = true;
 					expect(e.type).toBe("Wheels.Packages.NotAPackage");

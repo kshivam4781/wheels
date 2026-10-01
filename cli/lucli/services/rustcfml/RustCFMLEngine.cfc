@@ -312,24 +312,68 @@ component {
 		var statePath = $statePath(arguments.projectRoot);
 		if (!fileExists(statePath)) return false;
 		var state = $readState(arguments.projectRoot);
-		if (structKeyExists(state, "pid") && state.pid > 0) {
+		// Only signal the recorded pid when it is still THIS project's server: after a
+		// crash the state file outlives the process, and the pid can be reused by an
+		// unrelated program that must not be killed.
+		if ($ownsRecordedPid(state, arguments.projectRoot)) {
 			$kill(state.pid);
+			fileDelete(statePath);
+			return true;
+		}
+		// A live pid that is not this project's server (a reused pid, or a server
+		// started by an older CLI that the ownership check can't recognise) is
+		// neither killed nor forgotten: status() reports it by pid so it can be
+		// found and stopped by hand.
+		if (structKeyExists(state, "pid") && isNumeric(state.pid) && state.pid > 0 && $isAlive(state.pid)) {
+			return false;
 		}
 		fileDelete(statePath);
-		return true;
+		return false;
 	}
 
 	/**
-	 * Report the recorded state and whether the process is still alive.
+	 * Report the recorded state and whether this project's server is still
+	 * running. A recorded pid that is dead, or alive but no longer this
+	 * project's server (a reused pid), is stale: running is false and the
+	 * state file is removed.
 	 */
 	public struct function status(required string projectRoot) {
 		var state = $readState(arguments.projectRoot);
 		var running = false;
 		if (structCount(state) && structKeyExists(state, "pid")) {
-			running = $isAlive(state.pid);
+			running = $ownsRecordedPid(state, arguments.projectRoot);
+			if (!running) {
+				state.stale = true;
+				if (isNumeric(state.pid) && state.pid > 0 && $isAlive(state.pid)) {
+					// Alive but not this project's server: a reused pid, or a server an
+					// older CLI started. Keep the state so the pid stays findable.
+					state.staleReason = "pid-not-server";
+					state.message = notOursMessage(state.pid);
+				} else {
+					// Nothing runs under the pid any more: the state is just left over.
+					state.staleReason = "dead";
+					try {
+						fileDelete($statePath(arguments.projectRoot));
+					} catch (any e) {}
+				}
+			}
 		}
 		state.running = running;
 		return state;
+	}
+
+	/** What to tell the user about a recorded pid that is alive but not this project's server. */
+	public string function notOursMessage(required any pid) {
+		return "RustCFML pid " & arguments.pid & " is recorded for this project but is not its server. Stop it manually only if it is a RustCFML server you started; otherwise wheels start replaces the record.";
+	}
+
+	/** True when the recorded pid is alive AND is this project's RustCFML server. */
+	private boolean function $ownsRecordedPid(required struct state, required string projectRoot) {
+		return structKeyExists(arguments.state, "pid")
+			&& isNumeric(arguments.state.pid)
+			&& arguments.state.pid > 0
+			&& $isAlive(arguments.state.pid)
+			&& isProjectServerProcess(arguments.state.pid, arguments.projectRoot);
 	}
 
 	// -------------------------------------------------------------------------

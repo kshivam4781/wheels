@@ -266,7 +266,7 @@ component extends="wheels.wheelstest.system.BaseSpec" {
 						force = true
 					);
 					var showContent = fileRead(tempRoot & "/app/views/headlines/show.cfm");
-					expect(showContent).toInclude("##headline.title##");
+					expect(showContent).toInclude("##encodeForHTML(headline.title)##");
 					expect(showContent).notToInclude("<h1>##headline.id##</h1>");
 				});
 
@@ -290,7 +290,7 @@ component extends="wheels.wheelstest.system.BaseSpec" {
 						force = true
 					);
 					var showContent = fileRead(tempRoot & "/app/views/counters/show.cfm");
-					expect(showContent).toInclude("##counter.id##");
+					expect(showContent).toInclude("##encodeForHTML(counter.id)##");
 				});
 
 				it("merges hand-edited migration columns into the form (F3)", () => {
@@ -702,7 +702,7 @@ component extends="wheels.wheelstest.system.BaseSpec" {
 					var content = fileRead(tempRoot & "/app/views/reviews/index.cfm");
 					// findAll() queries are flat — reviews.author.name throws at runtime.
 					expect(content).notToInclude(".author.name");
-					expect(content).toInclude("##reviews.authorId##");
+					expect(content).toInclude("##encodeForHTML(reviews.authorId)##");
 				});
 
 				it("show.cfm association display is backed by the injected include", () => {

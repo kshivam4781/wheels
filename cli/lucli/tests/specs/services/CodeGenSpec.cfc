@@ -466,23 +466,16 @@ component extends="wheels.wheelstest.system.BaseSpec" {
 					expect(result.actions).toBeEmpty();
 				});
 
-				it("S2 PROVE: packagePath from listFirst is unvalidated so ../X writes outside app/controllers/", () => {
-					// Current hole: listFirst("../S2Escape","/") is ".." and is
-					// joined as packagePath without validateName. Destination
-					// becomes app/controllers/../S2Escape.cfc → app/S2Escape.cfc.
-					var result = codegen.generateController(
-						name = "../S2Escape",
-						actions = [],
-						force = true
-					);
-					var escapedPath = tempRoot & "/app/S2Escape.cfc";
-					var controllersPath = tempRoot & "/app/controllers/S2Escape.cfc";
-					expect(result.success).toBeTrue();
-					expect(fileExists(escapedPath)).toBeTrue();
-					expect(fileExists(controllersPath)).toBeFalse();
-					if (fileExists(escapedPath)) {
-						fileDelete(escapedPath);
+				it("refuses a package path with a parent-directory segment", () => {
+					var errorType = "";
+					try {
+						codegen.generateController(name = "../S2Escape", actions = [], force = true);
+					} catch (any e) {
+						errorType = e.type;
 					}
+					expect(errorType).toBe("Wheels.Generate.InvalidName");
+					expect(fileExists(tempRoot & "/app/S2Escape.cfc")).toBeFalse();
+					expect(fileExists(tempRoot & "/app/controllers/S2Escape.cfc")).toBeFalse();
 				});
 
 			});
@@ -608,7 +601,7 @@ component extends="wheels.wheelstest.system.BaseSpec" {
 					expect(result.valid).toBeTrue();
 				});
 
-				it("S2 PROVE: validateName rejects ../X but generateController never consults it", () => {
+				it("validateName rejects a parent-directory name", () => {
 					var result = codegen.validateName("../X", "controller");
 					expect(result.valid).toBeFalse();
 				});

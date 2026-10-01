@@ -202,6 +202,13 @@ component {
 		if (!Len(local.name)) {
 			Throw(type = "Wheels.Packages.BadInput", message = "remove requires a package name.");
 		}
+		new modules.wheels.services.packages.PackageName().assert(local.name);
+		if (!(arguments.opts.yes ?: false)) {
+			Throw(
+				type = "Wheels.Packages.ConfirmationRequired",
+				message = "Remove deletes vendor/#local.name#/. Re-run with --yes to confirm removing '#local.name#'."
+			);
+		}
 		variables.installer.uninstall(local.name);
 		return "Removed vendor/#local.name#." & Chr(10);
 	}
