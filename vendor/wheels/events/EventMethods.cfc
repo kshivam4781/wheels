@@ -28,13 +28,22 @@ component extends="wheels.Global" implements="wheels.interfaces.events.EventHand
 	public void function $runOnErrorSendEmail(required exception) {
 		local.args = {};
 		$args(name = "sendEmail", args = local.args);
-		local.args.from = application.wheels.errorEmailAddress;
-		if (Len(application.wheels.errorEmailFromAddress)) {
-			local.args.from = application.wheels.errorEmailFromAddress;
+		// Only configured addresses: errorEmailToAddress, else errorEmailAddress.
+		// The sender falls back to the recipient.
+		local.args.to = application.wheels.errorEmailToAddress;
+		if (!Len(local.args.to)) {
+			local.args.to = application.wheels.errorEmailAddress;
 		}
-		local.args.to = application.wheels.errorEmailAddress;
-		if (Len(application.wheels.errorEmailToAddress)) {
-			local.args.to = application.wheels.errorEmailToAddress;
+		local.args.from = application.wheels.errorEmailFromAddress;
+		if (!Len(local.args.from)) {
+			local.args.from = application.wheels.errorEmailAddress;
+		}
+		if (!Len(local.args.from)) {
+			local.args.from = local.args.to;
+		}
+		if (!Len(local.args.to)) {
+			$warnNoErrorEmailRecipient();
+			return;
 		}
 		if (Len(local.args.from) && Len(local.args.to)) {
 			if (StructKeyExists(application.wheels, "errorEmailServer") && Len(application.wheels.errorEmailServer)) {
@@ -61,6 +70,25 @@ component extends="wheels.Global" implements="wheels.interfaces.events.EventHand
 				$mail(argumentCollection = local.args);
 			} catch (any e) {
 			}
+		}
+	}
+
+	/**
+	 * sendEmailOnError is on but no recipient is configured: say so once per
+	 * application start in wheels.log instead of sending anything.
+	 */
+	public void function $warnNoErrorEmailRecipient() {
+		if (StructKeyExists(application.wheels, "$errorEmailRecipientWarned")) {
+			return;
+		}
+		application.wheels["$errorEmailRecipientWarned"] = true;
+		try {
+			WriteLog(
+				file = "wheels",
+				type = "warning",
+				text = "Wheels: sendEmailOnError is on but no error email recipient is configured, so no error email was sent. Set errorEmailAddress (or errorEmailToAddress) in config/settings.cfm or config/production/settings.cfm."
+			);
+		} catch (any e) {
 		}
 	}
 

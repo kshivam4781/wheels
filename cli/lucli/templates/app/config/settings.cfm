@@ -25,6 +25,10 @@
 	// The secret is read from .env (git-ignored) so it never lands in version control.
 	set(reloadPassword=env("WHEELS_RELOAD_PASSWORD", ""));
 
+	// Error emails: production turns sendEmailOnError on, but they go only to
+	// an address you configure. With none set, no error email is sent.
+	// set(errorEmailAddress=env("WHEELS_ERROR_EMAIL", ""));
+
 	/*
 		Canonical base URL for absolute links, redirects and emails. When set, its
 		scheme, host and port are used instead of the incoming request's (which a
