@@ -7,7 +7,7 @@ component extends="wheels.Global" implements="wheels.interfaces.events.EventHand
 			}
 			// Fire registered onError callbacks (packages like Sentry hook in here).
 			$fireOnErrorCallbacks(arguments.exception);
-			if (application.wheels.showErrorInformation) {
+			if ($get("showErrorInformation")) {
 				// Detect request format for format-specific error handling
 				local.format = $getRequestFormat();
 				local.wheelsError = $runOnErrorResolveWheelsError(arguments.exception);
@@ -297,7 +297,7 @@ component extends="wheels.Global" implements="wheels.interfaces.events.EventHand
 			$location(url = local.redirectAfterReloadUrl, addToken = false);
 		}
 		// If the first debug point has not already been set in a reload request we set it here.
-		if (application.wheels.showDebugInformation) {
+		if ($get("showDebugInformation")) {
 			if (StructKeyExists(request.wheels, "execution")) {
 				$debugPoint("reload");
 			} else {
@@ -425,7 +425,7 @@ component extends="wheels.Global" implements="wheels.interfaces.events.EventHand
 			}
 		}
 		$include(template = "#application.wheels.eventPath#/onrequeststart.cfm");
-		if (application.wheels.showDebugInformation) {
+		if ($get("showDebugInformation")) {
 			$debugPoint("requestStart");
 		}
 
@@ -462,12 +462,12 @@ component extends="wheels.Global" implements="wheels.interfaces.events.EventHand
 	}
 
 	public void function $runOnRequestEnd(required targetpage) {
-		if (application.wheels.showDebugInformation) {
+		if ($get("showDebugInformation")) {
 			$debugPoint("requestEnd");
 		}
 		$restoreTestRunnerApplicationScope();
 		$include(template = "#application.wheels.eventPath#/onrequestend.cfm");
-		if (application.wheels.showDebugInformation) {
+		if ($get("showDebugInformation")) {
 			$debugPoint("requestEnd,total");
 		}
 	}
@@ -482,7 +482,7 @@ component extends="wheels.Global" implements="wheels.interfaces.events.EventHand
 	}
 
 	public void function $runOnMissingTemplate(required targetpage) {
-		if (!application.wheels.showErrorInformation) {
+		if (!$get("showErrorInformation")) {
 			$header(statusCode = 404);
 		}
 		$includeAndOutput(template = "#application.wheels.eventPath#/onmissingtemplate.cfm");

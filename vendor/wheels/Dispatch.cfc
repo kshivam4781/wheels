@@ -396,7 +396,7 @@ component output="false" extends="wheels.Global"{
 
 		// Hi-jack any wheels controller requests for GUI
 		if (ListFirst(local.params.controller, '.') EQ "wheels") {
-			if (!application.wheels.enablePublicComponent) {
+			if (!$get("enablePublicComponent")) {
 				// Return 404 so the surface is not fingerprintable. A silent
 				// cfabort responds HTTP 200 with an empty body, which leaks
 				// the existence of the internal GUI routes. See issue #2233.

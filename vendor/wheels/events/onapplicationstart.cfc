@@ -464,6 +464,23 @@ component {
 		// check (in $runOnRequestStart) has a baseline to compare against.
 		application.$wheels.globalIncludesSnapshot = application.wo.$snapshotGlobalIncludes();
 
+		// GHSA-8r22: snapshot the three IP-debug flags as configured at app start.
+		// An app that still carries the pre-4.1.2 IP-debug block in its own
+		// Application.cfc writes these into the shared application.wheels scope per
+		// request, so $get() serves this boot snapshot for them instead of the
+		// shared value (a concurrent request must not see another client's grant).
+		// $set() keeps the snapshot in step so runtime set() of these flags works.
+		application.$wheels.$debugSettingsSnapshot = {};
+		if (StructKeyExists(application.$wheels, "showErrorInformation")) {
+			application.$wheels.$debugSettingsSnapshot.showErrorInformation = application.$wheels.showErrorInformation;
+		}
+		if (StructKeyExists(application.$wheels, "showDebugInformation")) {
+			application.$wheels.$debugSettingsSnapshot.showDebugInformation = application.$wheels.showDebugInformation;
+		}
+		if (StructKeyExists(application.$wheels, "enablePublicComponent")) {
+			application.$wheels.$debugSettingsSnapshot.enablePublicComponent = application.$wheels.enablePublicComponent;
+		}
+
 		// Assign it all to the application scope in one atomic call.
 		application.wheels = application.$wheels;
 		StructDelete(application, "$wheels");

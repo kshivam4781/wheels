@@ -393,7 +393,7 @@
 					local.rv = $serializeQueryToObjects(query = local.findAll.query, argumentCollection = arguments);
 					break;
 				default:
-					if (application.wheels.showErrorInformation) {
+					if ($get("showErrorInformation")) {
 						Throw(
 							type = "Wheels.IncorrectArgumentValue",
 							message = "Incorrect Arguments",

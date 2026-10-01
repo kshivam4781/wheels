@@ -1454,7 +1454,7 @@
 			}
 			if (Len(local.fields)) {
 				local.rv = Replace(local.rv, local.match, local.fields, "all");
-			} else if (application.wheels.showErrorInformation) {
+			} else if ($get("showErrorInformation")) {
 				Throw(
 					type = "Wheels.ModelNotFound",
 					message = "Wheels looked for the model mapped to table name `#local.tableName#` but couldn't find it.",
@@ -1659,7 +1659,7 @@
 			local.classAssociations = local.class.$classData().associations;
 
 			// throw an error if the association was not found
-			if (application.wheels.showErrorInformation && !StructKeyExists(local.classAssociations, local.name)) {
+			if ($get("showErrorInformation") && !StructKeyExists(local.classAssociations, local.name)) {
 				Throw(
 					type = "Wheels.AssociationNotFound",
 					message = "An association named `#local.name#` could not be found on the `#ListLast(local.levels)#` model.",
@@ -1793,7 +1793,7 @@
 						// here instead, while both candidate shapes are still in hand (#3337). Runs inside
 						// the memo so the success path costs one check per application lifetime, and only
 						// for defaults derived here — an explicit `foreignKey=` is the developer's call.
-						if (application.wheels.showErrorInformation) {
+						if ($get("showErrorInformation")) {
 							$assertDerivedForeignKeyResolves(
 								associationName = arguments.associationName,
 								foreignKey = arguments.association.foreignKey,

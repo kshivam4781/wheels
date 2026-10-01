@@ -722,7 +722,7 @@
 
 		// Throw error if host or protocol are passed with onlyPath=true.
 		local.hostOrProtocolNotEmpty = Len(arguments.host) || Len(arguments.protocol);
-		if (application.wheels.showErrorInformation && arguments.onlyPath && local.hostOrProtocolNotEmpty) {
+		if ($get("showErrorInformation") && arguments.onlyPath && local.hostOrProtocolNotEmpty) {
 			Throw(
 				type = "Wheels.IncorrectArguments",
 				message = "Can't use the `host` or `protocol` arguments when `onlyPath` is `true`.",
